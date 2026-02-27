@@ -3,6 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
@@ -83,16 +87,45 @@ Stops the current session (if running) and starts a fresh one.`,
 	RunE: runMayorRestart,
 }
 
+var mayorAcpCmd = &cobra.Command{
+	Use:   "acp",
+	Short: "Run Mayor in headless mode (Agent Control Protocol)",
+	Long: `Run the Mayor in headless mode with stdin/stdout connected.
+
+This command initializes a headless session without tmux, designed for
+IDE integration via the Agent Control Protocol. It bypasses all tmux
+logic and runs directly in the current terminal.
+
+Environment variable overrides:
+  GT_RIG          - Override rig name
+  GT_TOWN_ROOT    - Override town root directory
+  GT_ROLE         - Override role (default: mayor)
+
+The agent reads prompts from stdin and outputs to stdout. This enables
+programmatic control by IDEs or other tools that need direct agent access.`,
+	RunE: runMayorAcp,
+}
+
+var acpRigOverride string
+var acpTownRootOverride string
+var acpPrompt string
+
 func init() {
 	mayorCmd.AddCommand(mayorStartCmd)
 	mayorCmd.AddCommand(mayorStopCmd)
 	mayorCmd.AddCommand(mayorAttachCmd)
 	mayorCmd.AddCommand(mayorStatusCmd)
 	mayorCmd.AddCommand(mayorRestartCmd)
+	mayorCmd.AddCommand(mayorAcpCmd)
 
 	mayorStartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
 	mayorAttachCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
 	mayorRestartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
+
+	mayorAcpCmd.Flags().StringVar(&acpRigOverride, "rig", "", "Rig name (overrides GT_RIG env)")
+	mayorAcpCmd.Flags().StringVar(&acpTownRootOverride, "town", "", "Town root directory (overrides GT_TOWN_ROOT env)")
+	mayorAcpCmd.Flags().StringVar(&acpPrompt, "prompt", "", "Initial prompt to send to agent")
+	mayorAcpCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run (overrides town default)")
 
 	rootCmd.AddCommand(mayorCmd)
 }
@@ -314,4 +347,93 @@ func ensureMayorInfra(townRoot string) {
 			}
 		}
 	}
+}
+
+// runMayorAcp runs the Mayor in headless mode for IDE integration.
+// It bypasses tmux and execs the agent directly with stdin/stdout connected.
+func runMayorAcp(cmd *cobra.Command, args []string) error {
+	// Resolve town root (CLI flag > env > cwd detection)
+	townRoot := acpTownRootOverride
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_TOWN_ROOT")
+	}
+	if townRoot == "" {
+		var err error
+		townRoot, err = workspace.FindFromCwdOrError()
+		if err != nil {
+			return fmt.Errorf("not in a Gas Town workspace: %w", err)
+		}
+	}
+
+	// Ensure infra is running
+	ensureMayorInfra(townRoot)
+
+	// Resolve rig override (CLI flag > env > none)
+	rigName := acpRigOverride
+	if rigName == "" {
+		rigName = os.Getenv("GT_RIG")
+	}
+
+	// Resolve agent config
+	agentCfg, agentName, err := config.ResolveAgentConfigWithOverride(townRoot, "", mayorAgentOverride)
+	if err != nil {
+		return fmt.Errorf("resolving agent config: %w", err)
+	}
+
+	// Get the preset info for NonInteractive config
+	preset := config.GetAgentPresetByName(agentName)
+
+	// Build environment for mayor role
+	envVars := config.AgentEnv(config.AgentEnvConfig{
+		Role:     "mayor",
+		Rig:      rigName,
+		TownRoot: townRoot,
+		Prompt:   acpPrompt,
+	})
+
+	// Set environment variables
+	for k, v := range envVars {
+		os.Setenv(k, v)
+	}
+
+	// Build the agent command for headless execution
+	agentPath, err := exec.LookPath(agentCfg.Command)
+	if err != nil {
+		return fmt.Errorf("%s not found: %w", agentCfg.Command, err)
+	}
+
+	// Build args based on agent's non-interactive mode
+	var agentArgs []string
+	if preset != nil && preset.NonInteractive != nil && preset.NonInteractive.Subcommand != "" {
+		// Use non-interactive subcommand (e.g., "run" for opencode)
+		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
+		agentArgs = append(agentArgs, preset.NonInteractive.Subcommand)
+		if preset.NonInteractive.OutputFlag != "" {
+			agentArgs = append(agentArgs, strings.Fields(preset.NonInteractive.OutputFlag)...)
+		}
+	} else if preset != nil && preset.NonInteractive != nil && preset.NonInteractive.PromptFlag != "" {
+		// Use prompt flag for non-interactive execution
+		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
+		if acpPrompt != "" {
+			agentArgs = append(agentArgs, preset.NonInteractive.PromptFlag, acpPrompt)
+		}
+		if preset.NonInteractive.OutputFlag != "" {
+			agentArgs = append(agentArgs, strings.Fields(preset.NonInteractive.OutputFlag)...)
+		}
+	} else {
+		// Standard agent invocation - claude handles non-interactive natively
+		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
+		if acpPrompt != "" && agentCfg.PromptMode != "none" {
+			agentArgs = append(agentArgs, acpPrompt)
+		}
+	}
+
+	// Set working directory to mayor/
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.Chdir(mayorDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not cd to mayor directory: %v\n", err)
+	}
+
+	// Exec the agent (replaces current process)
+	return syscall.Exec(agentPath, agentArgs, os.Environ())
 }
