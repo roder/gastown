@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -778,11 +779,21 @@ func extractPolecatFromJSON(output string) string {
 // NukePolecat executes the actual nuke operation for a polecat.
 // This kills the tmux session, removes the worktree, and cleans up beads.
 // Refuses to nuke polecats with pending MRs in the refinery queue (gt-6a9d).
+// Refuses to nuke if an ACP session is active (gt-qnp).
 func NukePolecat(workDir, rigName, polecatName string) error {
+	// Persistence interlock (gt-qnp): veto cleanup if ACP session is active.
+	// The Mayor needs to review worker diffs at /Users/matt/gt/stroma/polecats/[name]
+	// before they vanish.
+	townRoot := workDirToTownRoot(workDir)
+	checker := mayor.NewCleanupVetoChecker(townRoot)
+	if vetoed, reason := checker.ShouldVetoCleanup(); vetoed {
+		return fmt.Errorf("refusing to nuke %s/%s: %s", rigName, polecatName, reason)
+	}
+
 	// Safety gate (gt-6a9d): refuse to nuke if MR is pending in refinery.
 	// Nuking deletes the remote branch, which the refinery needs to merge.
 	initRegistryFromWorkDir(workDir)
-	prefix := beads.GetPrefixForRig(workDirToTownRoot(workDir), rigName)
+	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentBeadID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	if hasPendingMR(workDir, rigName, polecatName, agentBeadID) {
 		return fmt.Errorf("refusing to nuke %s/%s: MR pending in refinery (gt-6a9d)", rigName, polecatName)
@@ -1203,8 +1214,25 @@ func isZombieState(agentState, hookBead string) bool {
 }
 
 // handleZombieCleanup determines the cleanup action for a confirmed zombie based on
-// its cleanup_status. Clean or empty status → auto-nuke. Dirty status → escalate.
+// its cleanup_status. Clean or empty status -> auto-nuke. Dirty status -> escalate.
+// If an ACP session is active, vetoes automatic cleanup to allow Mayor review.
 func handleZombieCleanup(workDir, rigName, polecatName, hookBead, cleanupStatus string, router *mail.Router, zombie *ZombieResult) {
+	// Persistence interlock (gt-qnp): check if ACP session is active before cleanup.
+	townRoot := workDirToTownRoot(workDir)
+	if mayor.IsACPActive(townRoot) {
+		existingWisp := findAnyCleanupWisp(workDir, polecatName)
+		if existingWisp != "" {
+			zombie.Action = fmt.Sprintf("cleanup-deferred-acp (cleanup_status=%s, existing-wisp=%s)", cleanupStatus, existingWisp)
+			return
+		}
+		wispID, wispErr := createCleanupWisp(workDir, polecatName, hookBead, "")
+		if wispErr != nil {
+			zombie.Error = wispErr
+		}
+		zombie.Action = fmt.Sprintf("cleanup-deferred-acp:%s (ACP session active, Mayor may review)", wispID)
+		return
+	}
+
 	switch cleanupStatus {
 	case "clean", "":
 		// Clean state or no cleanup info — try auto-nuke.
@@ -1405,11 +1433,12 @@ func getBeadStatus(workDir, beadID string) string {
 
 // resetAbandonedBead resets a dead polecat's hooked bead so it can be re-dispatched.
 // If the bead is in "hooked" or "in_progress" status, it:
-// 1. Records the respawn in the witness spawn-count ledger
-// 2. Resets status to open
-// 3. Clears assignee
-// 4. Sends mail to deacon for re-dispatch (includes respawn count; SPAWN_STORM
-//    prefix and Urgent priority when count exceeds defaultMaxBeadRespawns)
+//  1. Records the respawn in the witness spawn-count ledger
+//  2. Resets status to open
+//  3. Clears assignee
+//  4. Sends mail to deacon for re-dispatch (includes respawn count; SPAWN_STORM
+//     prefix and Urgent priority when count exceeds defaultMaxBeadRespawns)
+//
 // Returns true if the bead was recovered.
 func resetAbandonedBead(workDir, rigName, hookBead, polecatName string, router *mail.Router) bool {
 	if hookBead == "" {
