@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -102,7 +103,10 @@ Environment variable overrides:
   GT_ROLE         - Override role (default: mayor)
 
 The agent reads prompts from stdin and outputs to stdout. This enables
-programmatic control by IDEs or other tools that need direct agent access.`,
+programmatic control by IDEs or other tools that need direct agent access.
+
+While an ACP session is active, automatic cleanup of polecat workspaces
+is vetoed to allow the Mayor to review worker diffs before they vanish.`,
 	RunE: runMayorAcp,
 }
 
@@ -351,6 +355,8 @@ func ensureMayorInfra(townRoot string) {
 
 // runMayorAcp runs the Mayor in headless mode for IDE integration.
 // It bypasses tmux and execs the agent directly with stdin/stdout connected.
+// A PID file is created to signal that automatic cleanup should be vetoed,
+// allowing the Mayor to review worker diffs before cleanup.
 func runMayorAcp(cmd *cobra.Command, args []string) error {
 	// Resolve town root (CLI flag > env > cwd detection)
 	townRoot := acpTownRootOverride
@@ -433,6 +439,27 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 	if err := os.Chdir(mayorDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not cd to mayor directory: %v\n", err)
 	}
+
+	// Write PID file to signal ACP session is active
+	// This vetoes automatic cleanup of polecat workspaces
+	if err := mayor.WriteACPPid(townRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write ACP PID file: %v\n", err)
+	}
+	defer func() {
+		// Clean up PID file on exit
+		if err := mayor.RemoveACPPid(townRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove ACP PID file: %v\n", err)
+		}
+	}()
+
+	// Set up signal handling for graceful cleanup
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		mayor.RemoveACPPid(townRoot)
+		os.Exit(130) // 128 + SIGINT
+	}()
 
 	// Exec the agent (replaces current process)
 	return syscall.Exec(agentPath, agentArgs, os.Environ())
