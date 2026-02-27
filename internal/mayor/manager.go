@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Common errors
@@ -139,4 +141,38 @@ func (m *Manager) Status() (*tmux.SessionInfo, error) {
 	}
 
 	return t.GetSessionInfo(sessionID)
+}
+
+// GetMayorPrime returns the rendered mayor prime context as a raw string.
+// This includes the formula from templates and a timestamp, suitable for
+// ACP initialize responses where the full context needs to be provided
+// as a single string payload.
+func GetMayorPrime(townRoot string) (string, error) {
+	tmpl, err := templates.New()
+	if err != nil {
+		return "", fmt.Errorf("loading templates: %w", err)
+	}
+
+	townName, err := workspace.GetTownName(townRoot)
+	if err != nil {
+		townName = "unknown"
+	}
+
+	data := templates.RoleData{
+		Role:          "mayor",
+		TownRoot:      townRoot,
+		TownName:      townName,
+		WorkDir:       townRoot,
+		MayorSession:  session.MayorSessionName(),
+		DeaconSession: session.DeaconSessionName(),
+	}
+
+	content, err := tmpl.RenderRole("mayor", data)
+	if err != nil {
+		return "", fmt.Errorf("rendering mayor template: %w", err)
+	}
+
+	// Append timestamp
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	return fmt.Sprintf("[prime-rendered-at: %s]\n\n%s", timestamp, content), nil
 }
