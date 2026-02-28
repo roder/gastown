@@ -418,3 +418,239 @@ func TestJSONRPCError(t *testing.T) {
 		t.Error("error message not in marshaled output")
 	}
 }
+
+func TestIntegration_HandshakeSequence(t *testing.T) {
+	p := NewProxy()
+
+	initResp := &JSONRPCMessage{
+		JSONRPC: "2.0",
+		ID:      1,
+		Result:  json.RawMessage(`{"protocolVersion":1,"capabilities":{}}`),
+	}
+	p.extractSessionID(initResp)
+
+	if sid := p.SessionID(); sid != "" {
+		t.Errorf("expected empty session ID after init, got %q", sid)
+	}
+
+	sessionResp := &JSONRPCMessage{
+		JSONRPC: "2.0",
+		ID:      2,
+		Result:  json.RawMessage(`{"sessionId":"test-session-12345"}`),
+	}
+	p.extractSessionID(sessionResp)
+
+	if sid := p.SessionID(); sid != "test-session-12345" {
+		t.Errorf("expected session ID test-session-12345, got %q", sid)
+	}
+}
+
+func TestIntegration_StartupPromptInjection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	mockAgent := createMockACPAgent(t, true)
+	defer os.Remove(mockAgent)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p := NewProxy()
+	testPrompt := "GAS TOWN INTEGRATION TEST PROMPT"
+	p.SetStartupPrompt(testPrompt)
+
+	tmpDir := t.TempDir()
+	if err := p.Start(ctx, mockAgent, nil, tmpDir); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		p.Shutdown()
+	}()
+
+	_ = p.Forward()
+
+	if p.getStartupPrompt() != testPrompt {
+		t.Errorf("startup prompt not set correctly")
+	}
+}
+
+func TestIntegration_PropulsionNotificationFormat(t *testing.T) {
+	p := NewProxy()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	defer r.Close()
+
+	p.stdin = w
+
+	p.sessionMux.Lock()
+	p.sessionID = "test-session-propulsion"
+	p.sessionMux.Unlock()
+
+	propulsionParams := map[string]any{
+		"role":    "polecat",
+		"rig":     "gastown",
+		"message": "Polecat nux checking in",
+	}
+
+	go func() {
+		_ = p.InjectNotification("session/update", propulsionParams)
+		w.Close()
+	}()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+
+	var msg JSONRPCMessage
+	if err := json.Unmarshal(buf.Bytes(), &msg); err != nil {
+		t.Fatalf("failed to parse message: %v", err)
+	}
+
+	if msg.Method != "session/update" {
+		t.Errorf("expected method session/update, got %q", msg.Method)
+	}
+
+	var params map[string]any
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatalf("failed to parse params: %v", err)
+	}
+
+	if params["sessionId"] != "test-session-propulsion" {
+		t.Errorf("expected sessionId test-session-propulsion, got %v", params["sessionId"])
+	}
+	if params["role"] != "polecat" {
+		t.Errorf("expected role polecat, got %v", params["role"])
+	}
+}
+
+func TestIntegration_CleanExitOnAgentTermination(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	exitScript := createTempScript(t, "#!/bin/sh\nexit 0\n")
+	defer os.Remove(exitScript)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p := NewProxy()
+
+	tmpDir := t.TempDir()
+	if err := p.Start(ctx, exitScript, nil, tmpDir); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	agentDone := p.agentDone()
+	select {
+	case err := <-agentDone:
+		if err != nil {
+			t.Errorf("agent exited with error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("timeout waiting for agent to terminate")
+	}
+
+	p.markDone()
+}
+
+func TestIntegration_NonACPAgent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	nonACPAgent := createTempScript(t, "#!/bin/sh\necho 'not jsonrpc'\nexit 0\n")
+	defer os.Remove(nonACPAgent)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	p := NewProxy()
+
+	tmpDir := t.TempDir()
+	if err := p.Start(ctx, nonACPAgent, nil, tmpDir); err != nil {
+		t.Fatalf("failed to start proxy: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Forward()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("non-ACP agent returned error: %v (expected)", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("timeout waiting for non-ACP agent")
+	}
+
+	if sid := p.SessionID(); sid != "" {
+		t.Errorf("expected empty session ID for non-ACP agent, got %q", sid)
+	}
+}
+
+func createMockACPAgent(t *testing.T, validACP bool) string {
+	t.Helper()
+
+	var script string
+	if validACP {
+		script = `#!/bin/sh
+# Mock ACP agent for integration testing
+while IFS= read -r line; do
+    # Parse the JSON-RPC request
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | cut -d'"' -f4)
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | cut -d: -f2)
+    
+    case "$method" in
+        initialize)
+            echo '{"jsonrpc":"2.0","id":'$id',"result":{"protocolVersion":1,"capabilities":{}}}'
+            ;;
+        session/new)
+            echo '{"jsonrpc":"2.0","id":'$id',"result":{"sessionId":"test-session-12345"}}'
+            ;;
+        session/prompt)
+            echo '{"jsonrpc":"2.0","id":'$id',"result":{}}'
+            ;;
+        *)
+            echo '{"jsonrpc":"2.0","id":'$id',"result":{}}'
+            ;;
+    esac
+done
+`
+	} else {
+		script = "#!/bin/sh\necho 'not a valid ACP response'\n"
+	}
+
+	return createTempScript(t, script)
+}
+
+func createTempScript(t *testing.T, content string) string {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp("", "mock-agent-*.sh")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+
+	if _, err := tmpFile.WriteString(content); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("failed to close temp file: %v", err)
+	}
+
+	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+		t.Fatalf("failed to chmod script: %v", err)
+	}
+
+	return tmpFile.Name()
+}
