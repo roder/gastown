@@ -96,3 +96,78 @@ git push              # Push to remote
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+
+---
+
+## ACP: Agent Communication Protocol
+
+Gas Town supports running multiple agents simultaneously via the **Agent Communication Protocol (ACP)**. This enables coordinated multi-agent workflows where agents can communicate and share context.
+
+### Running the Mayor in Headless Mode
+
+The Mayor can run in headless mode using ACP for IDE integration:
+
+```bash
+gt mayor acp                    # Run with default agent
+gt mayor acp --agent opencode   # Run with specific agent
+gt mayor acp --rig gastown      # Specify rig name
+```
+
+**Requirements:**
+- The agent must support ACP (currently `opencode` is ACP-compatible)
+- ACP creates a PID file to prevent automatic cleanup during active sessions
+- While an ACP session is active, workspace cleanup is deferred to allow the Mayor to review worker diffs
+
+### ACP-Compatible Agents
+
+Configure an agent with `ACPSubcommand` to enable ACP support:
+
+```json
+{
+  "agents": {
+    "opencode": {
+      "acp_subcommand": "acp"
+    }
+  }
+}
+```
+
+---
+
+## Hooks and Adapter Installation
+
+Gas Town uses a hook system to integrate with agent runtimes. Hooks provide lifecycle events and instructions to agents.
+
+### Installing Hooks
+
+Browse and install hooks from the registry:
+
+```bash
+gt hooks list                           # List available hooks
+gt hooks registry                       # Show registry details
+gt hooks install <hook-id>              # Install to current worktree
+gt hooks install <hook-id> --role crew  # Install to all crew in current rig
+gt hooks install <hook-id> --all-rigs   # Install across all rigs (requires --role)
+gt hooks install <hook-id> --dry-run    # Preview without writing
+```
+
+### Hook Providers
+
+Each agent can define a hooks provider that controls how hooks are installed:
+
+| Provider   | Settings File     | Description                      |
+|------------|-------------------|----------------------------------|
+| claude     | settings.json     | Claude Code hooks                |
+| opencode   | gastown.js        | OpenCode plugin hooks            |
+| copilot    | copilot-instructions.md | Copilot instructions    |
+| pi         | gastown-hooks.js  | Pi agent extensions              |
+
+### Registering Custom Hook Installers
+
+For new agent integrations, register a hook installer function:
+
+```go
+config.RegisterHookInstaller("myagent", func(worktreePath string, hookDef config.HookDefinition) error {
+    // Write hook files to worktree
+})
+```
