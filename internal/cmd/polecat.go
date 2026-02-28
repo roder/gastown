@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,13 +12,17 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Polecat command flags
@@ -289,6 +294,35 @@ Examples:
 	RunE: runPolecatPrune,
 }
 
+var polecatAcpRigOverride string
+var polecatAcpTownRootOverride string
+var polecatAcpPolecatName string
+var polecatAcpAgentOverride string
+
+var polecatAcpCmd = &cobra.Command{
+	Use:   "acp <rig/polecat>",
+	Short: "Run polecat in headless mode (Agent Control Protocol)",
+	Long: `Run a polecat in headless mode with stdin/stdout connected.
+
+This command initializes a headless session without tmux, designed for
+IDE integration via the Agent Control Protocol. It bypasses all tmux
+logic and runs directly in the current terminal.
+
+Environment variable overrides:
+  GT_RIG          - Override rig name
+  GT_TOWN_ROOT    - Override town root directory
+  GT_ROLE         - Override role (default: polecat)
+
+The agent reads prompts from stdin and outputs to stdout. This enables
+programmatic control by IDEs or other tools that need direct agent access.
+
+Examples:
+  gt polecat acp gastown/slit
+  gt polecat acp gastown/slit --agent opencode`,
+	Args: cobra.ExactArgs(1),
+	RunE: runPolecatAcp,
+}
+
 func init() {
 	// List flags
 	polecatListCmd.Flags().BoolVar(&polecatListJSON, "json", false, "Output as JSON")
@@ -336,6 +370,12 @@ func init() {
 	polecatCmd.AddCommand(polecatNukeCmd)
 	polecatCmd.AddCommand(polecatStaleCmd)
 	polecatCmd.AddCommand(polecatPruneCmd)
+	polecatCmd.AddCommand(polecatAcpCmd)
+
+	// ACP flags
+	polecatAcpCmd.Flags().StringVar(&polecatAcpRigOverride, "rig", "", "Rig name (overrides GT_RIG env)")
+	polecatAcpCmd.Flags().StringVar(&polecatAcpTownRootOverride, "town", "", "Town root directory (overrides GT_TOWN_ROOT env)")
+	polecatAcpCmd.Flags().StringVar(&polecatAcpAgentOverride, "agent", "", "Agent alias to run (overrides town default)")
 
 	rootCmd.AddCommand(polecatCmd)
 }
@@ -1540,6 +1580,122 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runPolecatAcp(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	polecatRef := args[0]
+	parts := strings.SplitN(polecatRef, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid polecat reference: expected rig/name, got %s", polecatRef)
+	}
+	rigName := parts[0]
+	polecatName := parts[1]
+
+	townRoot := polecatAcpTownRootOverride
+	if townRoot == "" {
+		townRoot = os.Getenv("GT_TOWN_ROOT")
+	}
+	if townRoot == "" {
+		var err error
+		townRoot, err = workspace.FindFromCwdOrError()
+		if err != nil {
+			return fmt.Errorf("not in a Gas Town workspace: %w", err)
+		}
+	}
+
+	if polecatAcpRigOverride != "" {
+		rigName = polecatAcpRigOverride
+	}
+
+	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	if err != nil {
+		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+	}
+
+	g := git.NewGit(townRoot)
+	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
+	r, err := rigMgr.GetRig(rigName)
+	if err != nil {
+		return fmt.Errorf("rig '%s' not found", rigName)
+	}
+
+	_, agentName, err := config.ResolveAgentConfigWithOverride(townRoot, "", polecatAcpAgentOverride)
+	if err != nil {
+		return fmt.Errorf("resolving agent config: %w", err)
+	}
+
+	if !config.SupportsACP(agentName) {
+		return fmt.Errorf("agent '%s' does not support ACP. Use an ACP-compatible agent like 'opencode'.", agentName)
+	}
+
+	envVars := config.AgentEnv(config.AgentEnvConfig{
+		Role:     "polecat",
+		Rig:      rigName,
+		TownRoot: townRoot,
+	})
+	for k, v := range envVars {
+		os.Setenv(k, v)
+	}
+
+	polecatWorkDir := filepath.Join(r.Path, "polecats", polecatName)
+	if err := os.Chdir(polecatWorkDir); err != nil {
+		return fmt.Errorf("could not cd to polecat directory: %w", err)
+	}
+
+	if err := writePolecatACPPid(townRoot, rigName, polecatName); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write ACP PID file: %v\n", err)
+	}
+	defer func() {
+		if err := removePolecatACPPid(townRoot, rigName, polecatName); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove ACP PID file: %v\n", err)
+		}
+	}()
+
+	proxy := acp.NewProxy()
+
+	beacon := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: fmt.Sprintf("%s/polecats/%s", rigName, polecatName),
+		Sender:    "mayor",
+		Topic:     "acp",
+	})
+	proxy.SetStartupPrompt(beacon)
+
+	acpSubcmd := config.GetACPSubcommand(agentName)
+	var agentArgs []string
+	if acpSubcmd != "" {
+		agentArgs = []string{acpSubcmd}
+	}
+
+	if err := proxy.Start(ctx, agentName, agentArgs, polecatWorkDir); err != nil {
+		return fmt.Errorf("starting agent: %w", err)
+	}
+
+	return proxy.Forward()
+}
+
+func writePolecatACPPid(townRoot, rigName, polecatName string) error {
+	polecatDir := filepath.Join(townRoot, rigName, "polecats", polecatName)
+	if err := os.MkdirAll(polecatDir, 0755); err != nil {
+		return fmt.Errorf("creating polecat directory: %w", err)
+	}
+
+	pidPath := filepath.Join(polecatDir, "polecat-acp.pid")
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		return fmt.Errorf("writing ACP PID file: %w", err)
+	}
+	return nil
+}
+
+func removePolecatACPPid(townRoot, rigName, polecatName string) error {
+	pidPath := filepath.Join(townRoot, rigName, "polecats", polecatName, "polecat-acp.pid")
+	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
+		return nil
+	}
+	return os.Remove(pidPath)
 }
 
 func runPolecatPrune(cmd *cobra.Command, args []string) error {
