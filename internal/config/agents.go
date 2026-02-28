@@ -133,10 +133,27 @@ type AgentPresetInfo struct {
 	// that needs to be acknowledged via tmux.
 	EmitsPermissionWarning bool `json:"emits_permission_warning,omitempty"`
 
-	// ACPSubcommand is the subcommand for ACP (Agent Communication Protocol) support.
+	// ACPSubcommand is deprecated. Use ACPConfig instead.
+	// This field is kept for backwards compatibility.
 	// Empty means the agent does not support ACP.
 	// Example: "acp" for opencode → runs "opencode acp"
 	ACPSubcommand string `json:"acp_subcommand,omitempty"`
+
+	// ACPConfig contains configuration for ACP (Agent Communication Protocol) support.
+	// If set, this takes precedence over the deprecated ACPSubcommand field.
+	// The agent will be started with: {Command} {ACPConfig.Command} {ACPConfig.Args}
+	// Example: Command="opencode", Args=["acp"] → "opencode acp"
+	ACPConfig *ACPConfig `json:"acp_config,omitempty"`
+}
+
+// ACPConfig contains configuration for ACP (Agent Communication Protocol) support.
+type ACPConfig struct {
+	// Command is the subcommand to invoke for ACP (e.g., "acp", "agent").
+	// If empty, the agent is assumed to not support ACP.
+	Command string `json:"command,omitempty"`
+
+	// Args are additional arguments to pass when invoking the ACP subcommand.
+	Args []string `json:"args,omitempty"`
 }
 
 // NonInteractiveConfig contains settings for running agents non-interactively.
@@ -190,6 +207,11 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ReadyDelayMs:           10000,
 		InstructionsFile:       "CLAUDE.md",
 		EmitsPermissionWarning: true,
+		// ACP support
+		ACPConfig: &ACPConfig{
+			Command: "acp",
+			Args:    nil,
+		},
 	},
 	AgentGemini: {
 		Name:                AgentGemini,
@@ -213,6 +235,11 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		HooksSettingsFile: "settings.json",
 		ReadyDelayMs:      5000,
 		InstructionsFile:  "AGENTS.md",
+		// ACP support
+		ACPConfig: &ACPConfig{
+			Command: "acp",
+			Args:    nil,
+		},
 	},
 	AgentCodex: {
 		Name:                AgentCodex,
@@ -232,6 +259,11 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		PromptMode:       "none",
 		ReadyDelayMs:     3000,
 		InstructionsFile: "AGENTS.md",
+		// ACP support
+		ACPConfig: &ACPConfig{
+			Command: "acp",
+			Args:    nil,
+		},
 	},
 	AgentCursor: {
 		Name:                AgentCursor,
@@ -306,7 +338,10 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ReadyDelayMs:      8000,
 		InstructionsFile:  "AGENTS.md",
 		// ACP support
-		ACPSubcommand: "acp",
+		ACPConfig: &ACPConfig{
+			Command: "acp",
+			Args:    nil,
+		},
 	},
 	AgentCopilot: {
 		Name:                AgentCopilot,
@@ -331,6 +366,11 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		ReadyPromptPrefix:  "❯ ",
 		ReadyDelayMs:       5000,
 		InstructionsFile:   "AGENTS.md",
+		// ACP support
+		ACPConfig: &ACPConfig{
+			Command: "acp",
+			Args:    nil,
+		},
 	},
 	AgentPi: {
 		Name:                AgentPi,
@@ -768,18 +808,61 @@ func ResetHookInstallersForTesting() {
 }
 
 // SupportsACP checks if an agent supports ACP (Agent Communication Protocol).
-// Returns true if the agent has an ACPSubcommand configured.
+// Returns true if the agent has ACPConfig or the deprecated ACPSubcommand configured.
 func SupportsACP(agentName string) bool {
 	info := GetAgentPresetByName(agentName)
-	return info != nil && info.ACPSubcommand != ""
+	if info == nil {
+		return false
+	}
+	if info.ACPConfig != nil && info.ACPConfig.Command != "" {
+		return true
+	}
+	return info.ACPSubcommand != ""
+}
+
+// GetACPConfig returns the ACP configuration for an agent.
+// Returns nil if the agent doesn't support ACP.
+func GetACPConfig(agentName string) *ACPConfig {
+	info := GetAgentPresetByName(agentName)
+	if info == nil {
+		return nil
+	}
+	if info.ACPConfig != nil {
+		return info.ACPConfig
+	}
+	if info.ACPSubcommand != "" {
+		return &ACPConfig{
+			Command: info.ACPSubcommand,
+			Args:    nil,
+		}
+	}
+	return nil
+}
+
+// GetACPCommand returns the ACP subcommand for an agent.
+// Returns empty string if the agent doesn't support ACP.
+// This function supports both the new ACPConfig and the deprecated ACPSubcommand.
+func GetACPCommand(agentName string) string {
+	config := GetACPConfig(agentName)
+	if config == nil {
+		return ""
+	}
+	return config.Command
+}
+
+// GetACPArgs returns the ACP arguments for an agent.
+// Returns nil if the agent doesn't support ACP.
+func GetACPArgs(agentName string) []string {
+	config := GetACPConfig(agentName)
+	if config == nil {
+		return nil
+	}
+	return config.Args
 }
 
 // GetACPSubcommand returns the ACP subcommand for an agent.
-// Returns empty string if the agent doesn't support ACP.
+// Deprecated: Use GetACPConfig or GetACPCommand instead.
+// This function is kept for backwards compatibility.
 func GetACPSubcommand(agentName string) string {
-	info := GetAgentPresetByName(agentName)
-	if info == nil {
-		return ""
-	}
-	return info.ACPSubcommand
+	return GetACPCommand(agentName)
 }

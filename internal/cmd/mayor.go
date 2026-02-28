@@ -416,10 +416,13 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 	})
 	proxy.SetStartupPrompt(beacon)
 
-	acpSubcmd := config.GetACPSubcommand(agentName)
+	acpConfig := config.GetACPConfig(agentName)
 	var agentArgs []string
-	if acpSubcmd != "" {
-		agentArgs = []string{acpSubcmd}
+	if acpConfig != nil && acpConfig.Command != "" {
+		agentArgs = []string{acpConfig.Command}
+		if len(acpConfig.Args) > 0 {
+			agentArgs = append(agentArgs, acpConfig.Args...)
+		}
 	}
 
 	if err := proxy.Start(ctx, agentName, agentArgs, mayorDir); err != nil {
