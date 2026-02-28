@@ -13,16 +13,30 @@ import (
 	"syscall"
 )
 
+type handshakeState int
+
+const (
+	handshakeInit handshakeState = iota
+	handshakeWaitingForInit
+	handshakeWaitingForSessionNew
+	handshakeComplete
+)
+
 type Proxy struct {
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.Reader
-	sessionID  string
-	sessionMux sync.RWMutex
-	done       chan struct{}
-	doneOnce   sync.Once
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
+	cmd                *exec.Cmd
+	stdin              io.WriteCloser
+	stdout             io.Reader
+	sessionID          string
+	sessionMux         sync.RWMutex
+	done               chan struct{}
+	doneOnce           sync.Once
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	handshakeState     handshakeState
+	handshakeMux       sync.Mutex
+	startupPrompt      string
+	startupPromptState string
+	startupPromptMux   sync.RWMutex
 }
 
 type JSONRPCMessage struct {
@@ -45,8 +59,21 @@ type SessionNewResult struct {
 
 func NewProxy() *Proxy {
 	return &Proxy{
-		done: make(chan struct{}),
+		done:           make(chan struct{}),
+		handshakeState: handshakeInit,
 	}
+}
+
+func (p *Proxy) SetStartupPrompt(prompt string) {
+	p.startupPromptMux.Lock()
+	p.startupPrompt = prompt
+	p.startupPromptMux.Unlock()
+}
+
+func (p *Proxy) getStartupPrompt() string {
+	p.startupPromptMux.RLock()
+	defer p.startupPromptMux.RUnlock()
+	return p.startupPrompt
 }
 
 func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string, cwd string) error {
@@ -136,10 +163,25 @@ func (p *Proxy) forwardToAgent() {
 			continue
 		}
 
+		p.trackHandshakeRequest(&msg)
+
 		if err := encoder.Encode(&msg); err != nil {
 			p.markDone()
 			return
 		}
+	}
+}
+
+func (p *Proxy) trackHandshakeRequest(msg *JSONRPCMessage) {
+	if msg.Method == "" {
+		return
+	}
+
+	p.handshakeMux.Lock()
+	defer p.handshakeMux.Unlock()
+
+	if msg.Method == "initialize" && p.handshakeState == handshakeInit {
+		p.handshakeState = handshakeWaitingForInit
 	}
 }
 
@@ -170,10 +212,100 @@ func (p *Proxy) forwardFromAgent() {
 		}
 
 		p.extractSessionID(&msg)
+		shouldInjectPrompt := p.trackHandshakeResponse(&msg)
 
 		if err := encoder.Encode(&msg); err != nil {
 			p.markDone()
 			return
+		}
+
+		if shouldInjectPrompt {
+			if err := p.injectStartupPrompt(reader, encoder); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to inject startup prompt: %v\n", err)
+			}
+		}
+	}
+}
+
+func (p *Proxy) trackHandshakeResponse(msg *JSONRPCMessage) bool {
+	if msg.ID == nil || msg.Result == nil {
+		return false
+	}
+
+	p.handshakeMux.Lock()
+	defer p.handshakeMux.Unlock()
+
+	if p.handshakeState == handshakeWaitingForInit {
+		p.handshakeState = handshakeWaitingForSessionNew
+		return false
+	}
+
+	if p.handshakeState == handshakeWaitingForSessionNew && p.sessionID != "" {
+		p.handshakeState = handshakeComplete
+		return p.getStartupPrompt() != ""
+	}
+
+	return false
+}
+
+func (p *Proxy) injectStartupPrompt(reader *bufio.Reader, encoder *json.Encoder) error {
+	prompt := p.getStartupPrompt()
+	if prompt == "" {
+		return nil
+	}
+
+	p.sessionMux.RLock()
+	sessionID := p.sessionID
+	p.sessionMux.RUnlock()
+
+	params := map[string]any{
+		"sessionId": sessionID,
+		"prompt": []map[string]string{
+			{"type": "text", "text": prompt},
+		},
+	}
+	paramsBytes, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("marshaling prompt params: %w", err)
+	}
+
+	req := JSONRPCMessage{
+		JSONRPC: "2.0",
+		ID:      "gastown-startup-prompt",
+		Method:  "session/prompt",
+		Params:  paramsBytes,
+	}
+
+	if err := json.NewEncoder(p.stdin).Encode(&req); err != nil {
+		return fmt.Errorf("sending startup prompt: %w", err)
+	}
+
+	for {
+		select {
+		case <-p.done:
+			return fmt.Errorf("proxy shutting down")
+		default:
+		}
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading prompt response: %w", err)
+		}
+
+		var resp JSONRPCMessage
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			continue
+		}
+
+		if resp.ID == "gastown-startup-prompt" {
+			if err := encoder.Encode(&resp); err != nil {
+				return fmt.Errorf("forwarding prompt response: %w", err)
+			}
+			return nil
+		}
+
+		if err := encoder.Encode(&resp); err != nil {
+			return fmt.Errorf("forwarding buffered message: %w", err)
 		}
 	}
 }

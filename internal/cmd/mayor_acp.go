@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/acp"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 var acpCmd = &cobra.Command{
@@ -30,59 +31,40 @@ is deferred to avoid interrupting the session.`,
 			}
 		}
 
-		// 2. Check if the agent has an "acp" subcommand.
+		startupPrompt := buildStartupPrompt()
+
 		hasAcp, err := agentHasAcpSubcommand(agentBin)
 		if err != nil {
 			return fmt.Errorf("could not check for 'acp' subcommand: %w", err)
 		}
 
-		// 3. Get the Prime Directive (Formula)
-		// This is a placeholder for the actual logic to get the startup beacon.
-		// The real implementation would call session.FormatStartupBeacon().
-		formula := "You are the Gastown Mayor, the Overseer's Chief of Staff."
+		proxy := acp.NewProxy()
+		proxy.SetStartupPrompt(startupPrompt)
 
-		// 4. Construct the command based on whether the agent has an "acp" subcommand.
-		var c *exec.Cmd
 		ctx := context.Background()
+		cwd, _ := os.Getwd()
+
+		var agentArgs []string
 		if hasAcp {
-			c = exec.CommandContext(ctx, agentBin, "acp", "--prompt", formula)
-		} else {
-			// "Ghost" Identity fallback
-			identityPrompt := fmt.Sprintf("[IDENTITY OVERRIDE]: %s", formula)
-			c = exec.CommandContext(ctx, agentBin, "--prompt", identityPrompt)
+			agentArgs = []string{"acp"}
 		}
 
-		// 5. Create a pipe for the agent's stdin.
-		stdin, err := c.StdinPipe()
-		if err != nil {
-			return fmt.Errorf("could not create stdin pipe: %w", err)
+		if err := proxy.Start(ctx, agentBin, agentArgs, cwd); err != nil {
+			return fmt.Errorf("starting agent: %w", err)
 		}
 
-		// 6. Connect the agent's stdout and stderr.
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-
-		// 7. Start the agent.
-		if err := c.Start(); err != nil {
-			return fmt.Errorf("could not start agent: %w", err)
-		}
-
-		// 8. Write the initialize message to the agent's stdin.
-		// This is a placeholder for the actual JSON-RPC message.
-		initMessage := `{"jsonrpc": "2.0", "method": "initialize", "params": {}}`
-		if _, err := io.WriteString(stdin, initMessage+"\n"); err != nil {
-			return fmt.Errorf("could not write initialize message: %w", err)
-		}
-
-		// 9. Copy the user's stdin to the agent's stdin in a separate goroutine.
-		go func() {
-			defer stdin.Close()
-			io.Copy(stdin, os.Stdin)
-		}()
-
-		// 10. Wait for the command to complete.
-		return c.Wait()
+		return proxy.Forward()
 	},
+}
+
+func buildStartupPrompt() string {
+	recipient := session.BeaconRecipient("Mayor", "", "")
+	return session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient:               recipient,
+		Sender:                  "witness",
+		Topic:                   "cold-start",
+		IncludePrimeInstruction: true,
+	})
 }
 
 func agentHasAcpSubcommand(agentBin string) (bool, error) {
