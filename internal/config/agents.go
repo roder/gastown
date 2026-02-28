@@ -132,6 +132,11 @@ type AgentPresetInfo struct {
 	// EmitsPermissionWarning indicates the agent shows a bypass-permissions warning on startup
 	// that needs to be acknowledged via tmux.
 	EmitsPermissionWarning bool `json:"emits_permission_warning,omitempty"`
+
+	// ACPSubcommand is the subcommand for ACP (Agent Communication Protocol) support.
+	// Empty means the agent does not support ACP.
+	// Example: "acp" for opencode → runs "opencode acp"
+	ACPSubcommand string `json:"acp_subcommand,omitempty"`
 }
 
 // NonInteractiveConfig contains settings for running agents non-interactively.
@@ -214,7 +219,7 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Command:             "codex",
 		Args:                []string{"--dangerously-bypass-approvals-and-sandbox"},
 		ProcessNames:        []string{"codex"}, // Codex CLI binary
-		SessionIDEnv:        "",                 // Codex captures from JSONL output
+		SessionIDEnv:        "",                // Codex captures from JSONL output
 		ResumeFlag:          "resume",
 		ResumeStyle:         "subcommand",
 		SupportsHooks:       false, // Use env/files instead
@@ -283,8 +288,8 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 			"OPENCODE_PERMISSION": `{"*":"allow"}`,
 		},
 		ProcessNames:        []string{"opencode", "node", "bun"}, // Runs as Node.js or Bun
-		SessionIDEnv:        "",                                   // OpenCode manages sessions internally
-		ResumeFlag:          "",                                   // No resume support yet
+		SessionIDEnv:        "",                                  // OpenCode manages sessions internally
+		ResumeFlag:          "",                                  // No resume support yet
 		ResumeStyle:         "",
 		SupportsHooks:       true, // Uses .opencode/plugins/gastown.js
 		SupportsForkSession: false,
@@ -300,13 +305,15 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		HooksSettingsFile: "gastown.js",
 		ReadyDelayMs:      8000,
 		InstructionsFile:  "AGENTS.md",
+		// ACP support
+		ACPSubcommand: "acp",
 	},
 	AgentCopilot: {
 		Name:                AgentCopilot,
 		Command:             "copilot",
 		Args:                []string{"--yolo"},
 		ProcessNames:        []string{"copilot"}, // Copilot CLI binary (Node.js but reports as "copilot")
-		SessionIDEnv:        "",                   // Session IDs stored on disk, not in env
+		SessionIDEnv:        "",                  // Session IDs stored on disk, not in env
 		ResumeFlag:          "--resume",
 		ResumeStyle:         "flag",
 		SupportsHooks:       false, // Copilot instructions file is not executable hooks
@@ -331,9 +338,9 @@ var builtinPresets = map[AgentPreset]*AgentPresetInfo{
 		Args:                []string{"-e", ".pi/extensions/gastown-hooks.js"},
 		ProcessNames:        []string{"pi", "node", "bun"}, // Pi runs as Node.js
 		SessionIDEnv:        "PI_SESSION_ID",
-		ResumeFlag:          "",    // No resume support yet
+		ResumeFlag:          "", // No resume support yet
 		ResumeStyle:         "",
-		SupportsHooks:       true,  // Uses .pi/extensions/gastown-hooks.js
+		SupportsHooks:       true, // Uses .pi/extensions/gastown-hooks.js
 		HooksProvider:       "pi",
 		HooksDir:            ".pi/extensions",
 		HooksSettingsFile:   "gastown-hooks.js",
@@ -517,9 +524,9 @@ func RuntimeConfigFromPreset(preset AgentPreset) *RuntimeConfig {
 
 	rc := &RuntimeConfig{
 		Provider: string(info.Name),
-		Command: info.Command,
-		Args:    append([]string(nil), info.Args...), // Copy to avoid mutation
-		Env:     envCopy,
+		Command:  info.Command,
+		Args:     append([]string(nil), info.Args...), // Copy to avoid mutation
+		Env:      envCopy,
 	}
 
 	// Resolve command path for claude preset (handles alias installations)
@@ -758,4 +765,21 @@ func RegisterAgentForTesting(name string, info AgentPresetInfo) {
 // ResetHookInstallersForTesting clears all hook installer registrations.
 func ResetHookInstallersForTesting() {
 	hookInstallers = make(map[string]HookInstallerFunc)
+}
+
+// SupportsACP checks if an agent supports ACP (Agent Communication Protocol).
+// Returns true if the agent has an ACPSubcommand configured.
+func SupportsACP(agentName string) bool {
+	info := GetAgentPresetByName(agentName)
+	return info != nil && info.ACPSubcommand != ""
+}
+
+// GetACPSubcommand returns the ACP subcommand for an agent.
+// Returns empty string if the agent doesn't support ACP.
+func GetACPSubcommand(agentName string) string {
+	info := GetAgentPresetByName(agentName)
+	if info == nil {
+		return ""
+	}
+	return info.ACPSubcommand
 }
