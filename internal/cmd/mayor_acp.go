@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,7 +9,6 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/session"
 )
 
 var acpCmd = &cobra.Command{
@@ -21,11 +21,13 @@ underlying ACP-supported agent.
 While an ACP session is active, automatic cleanup of polecat workspaces
 is deferred to avoid interrupting the session.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// 1. Determine the agent binary to use.
-		// This should be configurable, but for now, we'll hardcode "opencode".
-		agentBin, err := exec.LookPath("opencode")
-		if err != nil {
-			return fmt.Errorf("could not find 'opencode' in PATH: %w", err)
+		agentBin := os.Getenv("GT_ACP_AGENT")
+		if agentBin == "" {
+			var err error
+			agentBin, err = exec.LookPath("opencode")
+			if err != nil {
+				return fmt.Errorf("could not find 'opencode' in PATH: %w", err)
+			}
 		}
 
 		// 2. Check if the agent has an "acp" subcommand.
