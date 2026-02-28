@@ -1,15 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -112,7 +110,6 @@ is vetoed to allow the Mayor to review worker diffs before they vanish.`,
 
 var acpRigOverride string
 var acpTownRootOverride string
-var acpPrompt string
 
 func init() {
 	mayorCmd.AddCommand(mayorStartCmd)
@@ -128,7 +125,6 @@ func init() {
 
 	mayorAcpCmd.Flags().StringVar(&acpRigOverride, "rig", "", "Rig name (overrides GT_RIG env)")
 	mayorAcpCmd.Flags().StringVar(&acpTownRootOverride, "town", "", "Town root directory (overrides GT_TOWN_ROOT env)")
-	mayorAcpCmd.Flags().StringVar(&acpPrompt, "prompt", "", "Initial prompt to send to agent")
 	mayorAcpCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run (overrides town default)")
 
 	rootCmd.AddCommand(mayorCmd)
@@ -358,7 +354,8 @@ func ensureMayorInfra(townRoot string) {
 // A PID file is created to signal that automatic cleanup should be vetoed,
 // allowing the Mayor to review worker diffs before cleanup.
 func runMayorAcp(cmd *cobra.Command, args []string) error {
-	// Resolve town root (CLI flag > env > cwd detection)
+	ctx := context.Background()
+
 	townRoot := acpTownRootOverride
 	if townRoot == "" {
 		townRoot = os.Getenv("GT_TOWN_ROOT")
@@ -371,96 +368,63 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Ensure infra is running
 	ensureMayorInfra(townRoot)
 
-	// Resolve rig override (CLI flag > env > none)
 	rigName := acpRigOverride
 	if rigName == "" {
 		rigName = os.Getenv("GT_RIG")
 	}
 
-	// Resolve agent config
-	agentCfg, agentName, err := config.ResolveAgentConfigWithOverride(townRoot, "", mayorAgentOverride)
+	_, agentName, err := config.ResolveAgentConfigWithOverride(townRoot, "", mayorAgentOverride)
 	if err != nil {
 		return fmt.Errorf("resolving agent config: %w", err)
 	}
 
-	// Get the preset info for NonInteractive config
-	preset := config.GetAgentPresetByName(agentName)
+	if !config.SupportsACP(agentName) {
+		return fmt.Errorf("agent '%s' does not support ACP. Use an ACP-compatible agent like 'opencode'.", agentName)
+	}
 
-	// Build environment for mayor role
 	envVars := config.AgentEnv(config.AgentEnvConfig{
 		Role:     "mayor",
 		Rig:      rigName,
 		TownRoot: townRoot,
-		Prompt:   acpPrompt,
 	})
-
-	// Set environment variables
 	for k, v := range envVars {
 		os.Setenv(k, v)
 	}
 
-	// Build the agent command for headless execution
-	agentPath, err := exec.LookPath(agentCfg.Command)
-	if err != nil {
-		return fmt.Errorf("%s not found: %w", agentCfg.Command, err)
-	}
-
-	// Build args based on agent's non-interactive mode
-	var agentArgs []string
-	if preset != nil && preset.NonInteractive != nil && preset.NonInteractive.Subcommand != "" {
-		// Use non-interactive subcommand (e.g., "run" for opencode)
-		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
-		agentArgs = append(agentArgs, preset.NonInteractive.Subcommand)
-		if preset.NonInteractive.OutputFlag != "" {
-			agentArgs = append(agentArgs, strings.Fields(preset.NonInteractive.OutputFlag)...)
-		}
-	} else if preset != nil && preset.NonInteractive != nil && preset.NonInteractive.PromptFlag != "" {
-		// Use prompt flag for non-interactive execution
-		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
-		if acpPrompt != "" {
-			agentArgs = append(agentArgs, preset.NonInteractive.PromptFlag, acpPrompt)
-		}
-		if preset.NonInteractive.OutputFlag != "" {
-			agentArgs = append(agentArgs, strings.Fields(preset.NonInteractive.OutputFlag)...)
-		}
-	} else {
-		// Standard agent invocation - claude handles non-interactive natively
-		agentArgs = append([]string{agentCfg.Command}, agentCfg.Args...)
-		if acpPrompt != "" && agentCfg.PromptMode != "none" {
-			agentArgs = append(agentArgs, acpPrompt)
-		}
-	}
-
-	// Set working directory to mayor/
 	mayorDir := filepath.Join(townRoot, "mayor")
 	if err := os.Chdir(mayorDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not cd to mayor directory: %v\n", err)
 	}
 
-	// Write PID file to signal ACP session is active
-	// This vetoes automatic cleanup of polecat workspaces
 	if err := mayor.WriteACPPid(townRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not write ACP PID file: %v\n", err)
 	}
 	defer func() {
-		// Clean up PID file on exit
 		if err := mayor.RemoveACPPid(townRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: could not remove ACP PID file: %v\n", err)
 		}
 	}()
 
-	// Set up signal handling for graceful cleanup
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		mayor.RemoveACPPid(townRoot)
-		os.Exit(130) // 128 + SIGINT
-	}()
+	proxy := acp.NewProxy()
 
-	// Exec the agent (replaces current process)
-	return syscall.Exec(agentPath, agentArgs, os.Environ())
+	beacon := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: "mayor",
+		Sender:    "human",
+		Topic:     "acp",
+	})
+	proxy.SetStartupPrompt(beacon)
+
+	acpSubcmd := config.GetACPSubcommand(agentName)
+	var agentArgs []string
+	if acpSubcmd != "" {
+		agentArgs = []string{acpSubcmd}
+	}
+
+	if err := proxy.Start(ctx, agentName, agentArgs, mayorDir); err != nil {
+		return fmt.Errorf("starting agent: %w", err)
+	}
+
+	return proxy.Forward()
 }
