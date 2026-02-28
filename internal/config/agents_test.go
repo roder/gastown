@@ -50,7 +50,7 @@ func TestGetAgentPresetByName(t *testing.T) {
 		{"cursor", AgentCursor, false},
 		{"auggie", AgentAuggie, false},
 		{"amp", AgentAmp, false},
-		{"aider", "", true},               // Not built-in, can be added via config
+		{"aider", "", true},                // Not built-in, can be added via config
 		{"opencode", AgentOpenCode, false}, // Built-in multi-model CLI agent
 		{"copilot", AgentCopilot, false},   // Built-in GitHub Copilot CLI agent
 		{"pi", AgentPi, false},             // Pi Coding Agent
@@ -133,11 +133,11 @@ func TestIsKnownPreset(t *testing.T) {
 		{"cursor", true},
 		{"auggie", true},
 		{"amp", true},
-		{"aider", false},    // Not built-in, can be added via config
-		{"opencode", true},  // Built-in multi-model CLI agent
-		{"copilot", true},   // Built-in GitHub Copilot CLI agent
-		{"pi", true},        // Pi Coding Agent
-		{"omp", true},       // Oh My Pi
+		{"aider", false},   // Not built-in, can be added via config
+		{"opencode", true}, // Built-in multi-model CLI agent
+		{"copilot", true},  // Built-in GitHub Copilot CLI agent
+		{"pi", true},       // Pi Coding Agent
+		{"omp", true},      // Oh My Pi
 		{"unknown", false},
 		{"chatgpt", false},
 	}
@@ -576,11 +576,11 @@ func TestGetSessionIDEnvVar(t *testing.T) {
 	}{
 		{"claude", "CLAUDE_SESSION_ID"},
 		{"gemini", "GEMINI_SESSION_ID"},
-		{"codex", ""},    // Codex uses JSONL output instead
-		{"cursor", ""},   // Cursor uses --resume with chatId directly
-		{"auggie", ""},   // Auggie uses --resume directly
-		{"amp", ""},      // AMP uses 'threads continue' subcommand
-		{"copilot", ""},  // Copilot stores session IDs on disk, not in env
+		{"codex", ""},   // Codex uses JSONL output instead
+		{"cursor", ""},  // Cursor uses --resume with chatId directly
+		{"auggie", ""},  // Auggie uses --resume directly
+		{"amp", ""},     // AMP uses 'threads continue' subcommand
+		{"copilot", ""}, // Copilot stores session IDs on disk, not in env
 		{"unknown", ""},
 	}
 
@@ -1256,5 +1256,128 @@ func TestAllHookSupportingAgentsHaveHookFields(t *testing.T) {
 		if preset.HooksSettingsFile == "" {
 			t.Errorf("agent %q: SupportsHooks=true but HooksSettingsFile is empty", name)
 		}
+	}
+}
+
+func TestSupportsACP(t *testing.T) {
+	t.Parallel()
+	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
+
+	tests := []struct {
+		agentName string
+		want      bool
+	}{
+		{"opencode", true},
+		{"claude", false},
+		{"gemini", false},
+		{"codex", false},
+		{"cursor", false},
+		{"auggie", false},
+		{"amp", false},
+		{"copilot", false},
+		{"pi", false},
+		{"unknown-agent", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.agentName, func(t *testing.T) {
+			if got := SupportsACP(tt.agentName); got != tt.want {
+				t.Errorf("SupportsACP(%q) = %v, want %v", tt.agentName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetACPSubcommand(t *testing.T) {
+	t.Parallel()
+	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
+
+	tests := []struct {
+		agentName string
+		want      string
+	}{
+		{"opencode", "acp"},
+		{"claude", ""},
+		{"gemini", ""},
+		{"codex", ""},
+		{"cursor", ""},
+		{"auggie", ""},
+		{"amp", ""},
+		{"copilot", ""},
+		{"pi", ""},
+		{"unknown-agent", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.agentName, func(t *testing.T) {
+			if got := GetACPSubcommand(tt.agentName); got != tt.want {
+				t.Errorf("GetACPSubcommand(%q) = %q, want %q", tt.agentName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestACPSubcommandBackwardsCompatibility(t *testing.T) {
+	ResetRegistryForTesting()
+	t.Cleanup(ResetRegistryForTesting)
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "agents.json")
+
+	customRegistry := AgentRegistry{
+		Version: CurrentAgentRegistryVersion,
+		Agents: map[string]*AgentPresetInfo{
+			"custom-agent": {
+				Name:          "custom-agent",
+				Command:       "custom-agent",
+				ACPSubcommand: "acp",
+			},
+			"legacy-agent": {
+				Name:          "legacy-agent",
+				Command:       "legacy-agent",
+				ACPSubcommand: "",
+			},
+		},
+	}
+
+	data, err := json.Marshal(customRegistry)
+	if err != nil {
+		t.Fatalf("failed to marshal test config: %v", err)
+	}
+
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	if err := LoadAgentRegistry(configPath); err != nil {
+		t.Fatalf("LoadAgentRegistry failed: %v", err)
+	}
+
+	if !SupportsACP("custom-agent") {
+		t.Error("SupportsACP(custom-agent) = false, want true (has ACPSubcommand)")
+	}
+
+	if GetACPSubcommand("custom-agent") != "acp" {
+		t.Errorf("GetACPSubcommand(custom-agent) = %q, want acp", GetACPSubcommand("custom-agent"))
+	}
+
+	if SupportsACP("legacy-agent") {
+		t.Error("SupportsACP(legacy-agent) = true, want false (no ACPSubcommand)")
+	}
+
+	if GetACPSubcommand("legacy-agent") != "" {
+		t.Errorf("GetACPSubcommand(legacy-agent) = %q, want empty", GetACPSubcommand("legacy-agent"))
+	}
+
+	agentInfo := GetAgentPresetByName("custom-agent")
+	if agentInfo == nil {
+		t.Fatal("custom-agent not found after loading registry")
+	}
+	if agentInfo.ACPSubcommand != "acp" {
+		t.Errorf("AgentPresetInfo.ACPSubcommand = %q, want acp", agentInfo.ACPSubcommand)
 	}
 }
