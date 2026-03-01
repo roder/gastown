@@ -12,8 +12,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"syscall"
 
-	"golang.org/x/sys/unix"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 type handshakeState int
@@ -86,16 +87,7 @@ func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string,
 	p.cmd = exec.CommandContext(childCtx, agentPath, agentArgs...)
 	p.cmd.Dir = cwd
 
-	p.cmd.SysProcAttr = &unix.SysProcAttr{
-		Setpgid: true,
-	}
-	// Kill entire process group on context cancellation to prevent orphaned children
-	p.cmd.Cancel = func() error {
-		if p.cmd.Process != nil {
-			return unix.Kill(-p.cmd.Process.Pid, unix.SIGKILL)
-		}
-		return nil
-	}
+	util.SetProcessGroup(p.cmd)
 
 	var err error
 	p.stdin, err = p.cmd.StdinPipe()
@@ -124,7 +116,7 @@ func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string,
 
 func (p *Proxy) Forward() error {
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, unix.SIGTERM, unix.SIGINT)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigChan)
 
 	p.wg.Add(2)
@@ -455,7 +447,7 @@ func (p *Proxy) Shutdown() {
 	if p.cmd != nil && p.cmd.Process != nil {
 		// Kill entire process group to prevent orphaned child processes
 		// Negative PID sends signal to all processes in the group
-		unix.Kill(-p.cmd.Process.Pid, unix.SIGKILL)
+		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
 
