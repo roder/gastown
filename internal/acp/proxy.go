@@ -86,6 +86,13 @@ func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string,
 	p.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
+	// Kill entire process group on context cancellation to prevent orphaned children
+	p.cmd.Cancel = func() error {
+		if p.cmd.Process != nil {
+			return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 
 	var err error
 	p.stdin, err = p.cmd.StdinPipe()
@@ -370,7 +377,9 @@ func (p *Proxy) Shutdown() {
 	}
 
 	if p.cmd != nil && p.cmd.Process != nil {
-		p.cmd.Process.Signal(syscall.SIGTERM)
+		// Kill entire process group to prevent orphaned child processes
+		// Negative PID sends signal to all processes in the group
+		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
 

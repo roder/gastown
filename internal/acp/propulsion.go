@@ -9,7 +9,7 @@ import (
 	beadsdk "github.com/steveyegge/beads"
 )
 
-const pollInterval = 3 * time.Second
+const pollInterval = 30 * time.Second
 
 type stateChange struct {
 	entityType string
@@ -80,137 +80,75 @@ func (p *Propeller) pollOnce() {
 func (p *Propeller) detectChanges(ctx context.Context) []stateChange {
 	var changes []stateChange
 
-	changes = append(changes, p.detectBeadChanges(ctx)...)
-	changes = append(changes, p.detectConvoyChanges(ctx)...)
-	changes = append(changes, p.detectPolecatChanges(ctx)...)
-
-	return changes
-}
-
-func (p *Propeller) detectBeadChanges(ctx context.Context) []stateChange {
-	var changes []stateChange
-
 	if p.store == nil {
 		return changes
 	}
 
+	// Single query for all open issues instead of 3 separate queries
 	statusOpen := beadsdk.StatusOpen
 	issues, err := p.store.SearchIssues(ctx, "", beadsdk.IssueFilter{Status: &statusOpen})
 	if err != nil {
 		return changes
 	}
 
+	// Process all issues in memory, categorizing by labels
 	for _, issue := range issues {
-		key := "bead:" + issue.ID
-		currentState := string(issue.Status)
-
-		changed, isNew := p.hasStateChanged(key, currentState)
-		if isNew {
-			p.setLastState(key, currentState)
-			continue
+		// Check for convoy label
+		if hasLabel(issue.Labels, "gt:convoy") {
+			if change := p.checkStateChange("convoy", issue.ID, issue.Title, string(issue.Status)); change != nil {
+				changes = append(changes, *change)
+			}
 		}
-		if changed {
-			oldState := p.getLastState(key)
-			p.setLastState(key, currentState)
-			changes = append(changes, stateChange{
-				entityType: "bead",
-				entityID:   issue.ID,
-				entityName: issue.Title,
-				oldState:   oldState,
-				newState:   currentState,
-			})
+
+		// Check for agent label (polecat)
+		if hasLabel(issue.Labels, "gt:agent") && issue.Assignee != "" {
+			if change := p.checkStateChange("polecat", issue.Assignee, issue.ID, string(issue.Status)); change != nil {
+				changes = append(changes, *change)
+			}
+		}
+
+		// All open issues are beads (unless they have special labels)
+		if !hasLabel(issue.Labels, "gt:convoy") && !hasLabel(issue.Labels, "gt:agent") {
+			if change := p.checkStateChange("bead", issue.ID, issue.Title, string(issue.Status)); change != nil {
+				changes = append(changes, *change)
+			}
 		}
 	}
 
 	return changes
 }
 
-func (p *Propeller) detectConvoyChanges(ctx context.Context) []stateChange {
-	var changes []stateChange
-
-	if p.store == nil {
-		return changes
-	}
-
-	statusOpen := beadsdk.StatusOpen
-	convoyLabel := "gt:convoy"
-	issues, err := p.store.SearchIssues(ctx, "", beadsdk.IssueFilter{
-		Status: &statusOpen,
-		Labels: []string{convoyLabel},
-	})
-	if err != nil {
-		return changes
-	}
-
-	for _, issue := range issues {
-		key := "convoy:" + issue.ID
-		currentState := string(issue.Status)
-
-		changed, isNew := p.hasStateChanged(key, currentState)
-		if isNew {
-			p.setLastState(key, currentState)
-			continue
-		}
-		if changed {
-			oldState := p.getLastState(key)
-			p.setLastState(key, currentState)
-			changes = append(changes, stateChange{
-				entityType: "convoy",
-				entityID:   issue.ID,
-				entityName: issue.Title,
-				oldState:   oldState,
-				newState:   currentState,
-			})
+// hasLabel checks if a label exists in the label slice
+func hasLabel(labels []string, target string) bool {
+	for _, label := range labels {
+		if label == target {
+			return true
 		}
 	}
-
-	return changes
+	return false
 }
 
-func (p *Propeller) detectPolecatChanges(ctx context.Context) []stateChange {
-	var changes []stateChange
+// checkStateChange checks if state changed and returns a stateChange if so
+func (p *Propeller) checkStateChange(entityType, entityID, entityName, currentState string) *stateChange {
+	key := entityType + ":" + entityID
 
-	if p.store == nil {
-		return changes
+	changed, isNew := p.hasStateChanged(key, currentState)
+	if isNew {
+		p.setLastState(key, currentState)
+		return nil
 	}
-
-	statusOpen := beadsdk.StatusOpen
-	agentLabel := "gt:agent"
-	issues, err := p.store.SearchIssues(ctx, "", beadsdk.IssueFilter{
-		Status: &statusOpen,
-		Labels: []string{agentLabel},
-	})
-	if err != nil {
-		return changes
-	}
-
-	for _, issue := range issues {
-		if issue.Assignee == "" {
-			continue
-		}
-
-		key := "polecat:" + issue.Assignee
-		currentState := string(issue.Status)
-
-		changed, isNew := p.hasStateChanged(key, currentState)
-		if isNew {
-			p.setLastState(key, currentState)
-			continue
-		}
-		if changed {
-			oldState := p.getLastState(key)
-			p.setLastState(key, currentState)
-			changes = append(changes, stateChange{
-				entityType: "polecat",
-				entityID:   issue.Assignee,
-				entityName: issue.ID,
-				oldState:   oldState,
-				newState:   currentState,
-			})
+	if changed {
+		oldState := p.getLastState(key)
+		p.setLastState(key, currentState)
+		return &stateChange{
+			entityType: entityType,
+			entityID:   entityID,
+			entityName: entityName,
+			oldState:   oldState,
+			newState:   currentState,
 		}
 	}
-
-	return changes
+	return nil
 }
 
 func (p *Propeller) hasStateChanged(key, currentState string) (changed bool, isNew bool) {

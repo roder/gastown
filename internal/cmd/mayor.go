@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -415,6 +416,23 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 		Topic:     "acp",
 	})
 	proxy.SetStartupPrompt(beacon)
+
+	// Open beads store for Propeller to poll state changes
+	hqBeadsDir := filepath.Join(townRoot, ".beads")
+	store, err := beadsdk.OpenFromConfig(ctx, hqBeadsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open beads store for Propeller: %v\n", err)
+	}
+
+	// Create and start Propeller for state change notifications
+	propeller := acp.NewPropeller(proxy, store)
+	if store != nil {
+		propeller.Start(ctx)
+		defer func() {
+			propeller.Stop()
+			store.Close()
+		}()
+	}
 
 	acpConfig := config.GetACPConfig(agentName)
 	var agentArgs []string

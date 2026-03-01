@@ -193,7 +193,7 @@ func TestPropeller_DetectBeadChanges(t *testing.T) {
 	prop := NewPropeller(nil, mock)
 	ctx := context.Background()
 
-	changes := prop.detectBeadChanges(ctx)
+	changes := prop.detectChanges(ctx)
 
 	if len(changes) != 0 {
 		t.Errorf("first poll should not produce changes, got %d", len(changes))
@@ -203,12 +203,15 @@ func TestPropeller_DetectBeadChanges(t *testing.T) {
 	mock.issues[0].Status = beadsdk.StatusInProgress
 	mock.mu.Unlock()
 
-	changes = prop.detectBeadChanges(ctx)
+	changes = prop.detectChanges(ctx)
 
 	if len(changes) != 1 {
 		t.Fatalf("expected 1 change, got %d", len(changes))
 	}
 
+	if changes[0].entityType != "bead" {
+		t.Errorf("expected entityType 'bead', got %q", changes[0].entityType)
+	}
 	if changes[0].oldState != "open" {
 		t.Errorf("expected oldState 'open', got %q", changes[0].oldState)
 	}
@@ -228,7 +231,7 @@ func TestPropeller_DetectConvoyChanges(t *testing.T) {
 	prop := NewPropeller(nil, mock)
 	ctx := context.Background()
 
-	changes := prop.detectConvoyChanges(ctx)
+	changes := prop.detectChanges(ctx)
 
 	if len(changes) != 0 {
 		t.Errorf("first poll should not produce changes, got %d", len(changes))
@@ -238,7 +241,7 @@ func TestPropeller_DetectConvoyChanges(t *testing.T) {
 	mock.issues[0].Status = beadsdk.StatusClosed
 	mock.mu.Unlock()
 
-	changes = prop.detectConvoyChanges(ctx)
+	changes = prop.detectChanges(ctx)
 
 	if len(changes) != 1 {
 		t.Fatalf("expected 1 change, got %d", len(changes))
@@ -260,7 +263,7 @@ func TestPropeller_DetectPolecatChanges(t *testing.T) {
 	prop := NewPropeller(nil, mock)
 	ctx := context.Background()
 
-	changes := prop.detectPolecatChanges(ctx)
+	changes := prop.detectChanges(ctx)
 
 	if len(changes) != 0 {
 		t.Errorf("first poll should not produce changes, got %d", len(changes))
@@ -270,7 +273,7 @@ func TestPropeller_DetectPolecatChanges(t *testing.T) {
 	mock.issues[0].Status = beadsdk.StatusInProgress
 	mock.mu.Unlock()
 
-	changes = prop.detectPolecatChanges(ctx)
+	changes = prop.detectChanges(ctx)
 
 	if len(changes) != 1 {
 		t.Fatalf("expected 1 change, got %d", len(changes))
