@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -29,7 +30,7 @@ const (
 type Proxy struct {
 	cmd                *exec.Cmd
 	stdin              io.WriteCloser
-	stdout             io.Reader
+	stdout             io.ReadCloser
 	sessionID          string
 	sessionMux         sync.RWMutex
 	done               chan struct{}
@@ -100,6 +101,7 @@ func (p *Proxy) Start(ctx context.Context, agentPath string, agentArgs []string,
 	if err != nil {
 		cancel()
 		p.stdin.Close()
+		p.cmd.Wait()
 		return fmt.Errorf("creating stdout pipe: %w", err)
 	}
 
@@ -119,19 +121,34 @@ func (p *Proxy) Forward() error {
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigChan)
 
+	errChan := make(chan error, 1)
 	p.wg.Add(2)
 	go p.forwardToAgent()
 	go p.forwardFromAgent()
+	go func() {
+		errChan <- p.cmd.Wait()
+	}()
 
 	select {
 	case <-sigChan:
 		p.Shutdown()
 	case <-p.done:
-	case <-p.agentDone():
+	case err := <-errChan:
+		return err
 	}
 
-	p.wg.Wait()
-	return p.cmd.Wait()
+	doneChan := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(doneChan)
+	}()
+
+	select {
+	case <-doneChan:
+	case <-time.After(5 * time.Second):
+	}
+
+	return <-errChan
 }
 
 func (p *Proxy) forwardToAgent() {
@@ -444,9 +461,15 @@ func (p *Proxy) Shutdown() {
 		p.cancel()
 	}
 
+	if p.stdin != nil {
+		p.stdin.Close()
+	}
+
+	if p.stdout != nil {
+		p.stdout.Close()
+	}
+
 	if p.cmd != nil && p.cmd.Process != nil {
-		// Kill entire process group to prevent orphaned child processes
-		// Negative PID sends signal to all processes in the group
 		syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 	}
 }
