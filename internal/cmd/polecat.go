@@ -1663,10 +1663,10 @@ func runPolecatAcp(cmd *cobra.Command, args []string) error {
 	})
 	proxy.SetStartupPrompt(beacon)
 
-	acpSubcmd := config.GetACPSubcommand(agentName)
+	acpConfig := config.GetACPConfig(agentName)
 	var agentArgs []string
-	if acpSubcmd != "" {
-		agentArgs = []string{acpSubcmd}
+	if acpConfig != nil && acpConfig.Command != "" {
+		agentArgs = []string{acpConfig.Command}
 	}
 
 	if err := proxy.Start(ctx, agentName, agentArgs, polecatWorkDir); err != nil {

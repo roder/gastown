@@ -1290,7 +1290,7 @@ func TestSupportsACP(t *testing.T) {
 	}
 }
 
-func TestGetACPSubcommand(t *testing.T) {
+func TestGetACPCommand(t *testing.T) {
 	t.Parallel()
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
@@ -1314,14 +1314,14 @@ func TestGetACPSubcommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.agentName, func(t *testing.T) {
-			if got := GetACPSubcommand(tt.agentName); got != tt.want {
-				t.Errorf("GetACPSubcommand(%q) = %q, want %q", tt.agentName, got, tt.want)
+			if got := GetACPCommand(tt.agentName); got != tt.want {
+				t.Errorf("GetACPCommand(%q) = %q, want %q", tt.agentName, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestACPSubcommandBackwardsCompatibility(t *testing.T) {
+func TestACPConfig(t *testing.T) {
 	ResetRegistryForTesting()
 	t.Cleanup(ResetRegistryForTesting)
 
@@ -1332,14 +1332,16 @@ func TestACPSubcommandBackwardsCompatibility(t *testing.T) {
 		Version: CurrentAgentRegistryVersion,
 		Agents: map[string]*AgentPresetInfo{
 			"custom-agent": {
-				Name:          "custom-agent",
-				Command:       "custom-agent",
-				ACPSubcommand: "acp",
+				Name:    "custom-agent",
+				Command: "custom-agent",
+				ACP: &ACPConfig{
+					Command: "acp",
+				},
 			},
 			"legacy-agent": {
-				Name:          "legacy-agent",
-				Command:       "legacy-agent",
-				ACPSubcommand: "",
+				Name:    "legacy-agent",
+				Command: "legacy-agent",
+				ACP:     nil,
 			},
 		},
 	}
@@ -1358,26 +1360,26 @@ func TestACPSubcommandBackwardsCompatibility(t *testing.T) {
 	}
 
 	if !SupportsACP("custom-agent") {
-		t.Error("SupportsACP(custom-agent) = false, want true (has ACPSubcommand)")
+		t.Error("SupportsACP(custom-agent) = false, want true (has ACP)")
 	}
 
-	if GetACPSubcommand("custom-agent") != "acp" {
-		t.Errorf("GetACPSubcommand(custom-agent) = %q, want acp", GetACPSubcommand("custom-agent"))
+	if GetACPCommand("custom-agent") != "acp" {
+		t.Errorf("GetACPCommand(custom-agent) = %q, want acp", GetACPCommand("custom-agent"))
 	}
 
 	if SupportsACP("legacy-agent") {
-		t.Error("SupportsACP(legacy-agent) = true, want false (no ACPSubcommand)")
+		t.Error("SupportsACP(legacy-agent) = true, want false (no ACP)")
 	}
 
-	if GetACPSubcommand("legacy-agent") != "" {
-		t.Errorf("GetACPSubcommand(legacy-agent) = %q, want empty", GetACPSubcommand("legacy-agent"))
+	if GetACPCommand("legacy-agent") != "" {
+		t.Errorf("GetACPCommand(legacy-agent) = %q, want empty", GetACPCommand("legacy-agent"))
 	}
 
 	agentInfo := GetAgentPresetByName("custom-agent")
 	if agentInfo == nil {
 		t.Fatal("custom-agent not found after loading registry")
 	}
-	if agentInfo.ACPSubcommand != "acp" {
-		t.Errorf("AgentPresetInfo.ACPSubcommand = %q, want acp", agentInfo.ACPSubcommand)
+	if agentInfo.ACP == nil || agentInfo.ACP.Command != "acp" {
+		t.Errorf("AgentPresetInfo.ACP.Command = %q, want acp", agentInfo.ACP.Command)
 	}
 }
