@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -326,6 +327,10 @@ func (p *Proxy) InjectNotification(method string, params any) error {
 	sessionID := p.sessionID
 	p.sessionMux.RUnlock()
 
+	if sessionID == "" {
+		log.Printf("warning: ACP Proxy.InjectNotification called with empty sessionID")
+	}
+
 	msg := JSONRPCMessage{
 		JSONRPC: "2.0",
 		Method:  method,
@@ -353,7 +358,10 @@ func (p *Proxy) InjectNotification(method string, params any) error {
 		msg.Params = rawParams
 	}
 
-	return json.NewEncoder(p.stdin).Encode(&msg)
+	if err := json.NewEncoder(p.stdin).Encode(&msg); err != nil {
+		return fmt.Errorf("encoding notification: %w", err)
+	}
+	return nil
 }
 
 func (p *Proxy) SessionID() string {

@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -238,6 +239,7 @@ func (p *Propeller) setLastState(key, state string) {
 
 func (p *Propeller) notifyChange(change stateChange) {
 	if p.proxy == nil {
+		log.Printf("warning: ACP Propeller cannot notify: proxy is nil")
 		return
 	}
 
@@ -256,7 +258,10 @@ func (p *Propeller) notifyChange(change stateChange) {
 		},
 	}
 
-	_ = p.proxy.InjectNotification("session/update", params)
+	if err := p.proxy.InjectNotification("session/update", params); err != nil {
+		log.Printf("warning: ACP Propeller failed to inject notification for %s %s: %v",
+			change.entityType, change.entityID, err)
+	}
 }
 
 func (p *Propeller) formatNotification(change stateChange) string {
