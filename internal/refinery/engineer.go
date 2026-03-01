@@ -267,17 +267,17 @@ func (e *Engineer) LoadConfig() error {
 	// Parse merge_queue section into our config struct
 	// We need special handling for poll_interval (string -> Duration)
 	var mqRaw struct {
-		Enabled              *bool                      `json:"enabled"`
-		OnConflict           *string                    `json:"on_conflict"`
-		RunTests             *bool                      `json:"run_tests"`
-		TestCommand          *string                    `json:"test_command"`
-		DeleteMergedBranches *bool                      `json:"delete_merged_branches"`
-		RetryFlakyTests      *int                       `json:"retry_flaky_tests"`
-		PollInterval         *string                    `json:"poll_interval"`
-		MaxConcurrent        *int                       `json:"max_concurrent"`
-		StaleClaimTimeout    *string                    `json:"stale_claim_timeout"`
-		Gates                map[string]*gateConfigRaw  `json:"gates"`
-		GatesParallel        *bool                      `json:"gates_parallel"`
+		Enabled              *bool                     `json:"enabled"`
+		OnConflict           *string                   `json:"on_conflict"`
+		RunTests             *bool                     `json:"run_tests"`
+		TestCommand          *string                   `json:"test_command"`
+		DeleteMergedBranches *bool                     `json:"delete_merged_branches"`
+		RetryFlakyTests      *int                      `json:"retry_flaky_tests"`
+		PollInterval         *string                   `json:"poll_interval"`
+		MaxConcurrent        *int                      `json:"max_concurrent"`
+		StaleClaimTimeout    *string                   `json:"stale_claim_timeout"`
+		Gates                map[string]*gateConfigRaw `json:"gates"`
+		GatesParallel        *bool                     `json:"gates_parallel"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -363,12 +363,13 @@ func (e *Engineer) Config() *MergeQueueConfig {
 
 // ProcessResult contains the result of processing a merge request.
 type ProcessResult struct {
-	Success     bool
-	MergeCommit string
-	Error       string
-	Conflict    bool
-	TestsFailed bool
-	SlotTimeout bool // Merge slot contention timeout (distinct from build/test failure)
+	Success          bool
+	MergeCommit      string
+	Error            string
+	Conflict         bool
+	TestsFailed      bool
+	SlotTimeout      bool // Merge slot contention timeout (distinct from build/test failure)
+	MergedExternally bool // Branch was already merged externally (outside refinery)
 }
 
 // doMerge performs the actual git merge operation.
@@ -386,6 +387,24 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 		return ProcessResult{
 			Success: false,
 			Error:   fmt.Sprintf("branch %s not found locally", branch),
+		}
+	}
+
+	// Step 1.5: Check if branch was already merged externally (outside refinery)
+	// This detects the case where someone manually merged the branch to main
+	// while the MR was still in the queue. The branch tip should be an ancestor
+	// of the target branch if it was merged.
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Checking if branch was already merged externally...\n")
+	mergedExternally, err := e.git.BranchMergedInto(branch, "origin/"+target)
+	if err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not check external merge status: %v (continuing)\n", err)
+	} else if mergedExternally {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Branch %s is already merged into %s - marking as merged_externally\n", branch, target)
+		return ProcessResult{
+			Success:          true,
+			MergeCommit:      "", // No merge commit since already merged
+			Conflict:         false,
+			MergedExternally: true, // Flag for HandleMRInfoSuccess to mark as external merge
 		}
 	}
 
@@ -865,6 +884,12 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Released merge slot\n")
 	}
 
+	// Determine close reason based on whether merge was external
+	closeReason := "merged"
+	if result.MergedExternally {
+		closeReason = "merged_externally"
+	}
+
 	// Update and close the MR bead
 	if mr.ID != "" {
 		// Fetch the MR bead to update its fields
@@ -877,19 +902,22 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 			if mrFields == nil {
 				mrFields = &beads.MRFields{}
 			}
-			mrFields.MergeCommit = result.MergeCommit
-			mrFields.CloseReason = "merged"
+			// Only set merge commit if we actually performed the merge (not external)
+			if !result.MergedExternally {
+				mrFields.MergeCommit = result.MergeCommit
+			}
+			mrFields.CloseReason = closeReason
 			newDesc := beads.SetMRFields(mrBead, mrFields)
 			if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to update MR %s with merge commit: %v\n", mr.ID, err)
 			}
 		}
 
-		// Close MR bead with reason 'merged'
-		if err := e.beads.CloseWithReason("merged", mr.ID); err != nil {
+		// Close MR bead with appropriate reason
+		if err := e.beads.CloseWithReason(closeReason, mr.ID); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close MR %s: %v\n", mr.ID, err)
 		} else {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s\n", mr.ID)
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
 		}
 	}
 
@@ -930,7 +958,11 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 	e.postMergeConvoyCheck(mr)
 
 	// 4. Log success
-	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	if result.MergedExternally {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged externally: %s (branch already in target)\n", mr.ID)
+	} else {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
+	}
 }
 
 // HandleMRInfoFailure handles a failed merge from MRInfo.

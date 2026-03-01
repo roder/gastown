@@ -335,9 +335,9 @@ func configureRefspec(repoPath string, singleBranch bool) error {
 			}
 			return nil
 		}
-		headRef := strings.TrimSpace(headOut.String())        // e.g. "refs/heads/main"
-		branch := strings.TrimPrefix(headRef, "refs/heads/")  // e.g. "main"
-		refspec := branch + ":refs/remotes/origin/" + branch   // e.g. "main:refs/remotes/origin/main"
+		headRef := strings.TrimSpace(headOut.String())       // e.g. "refs/heads/main"
+		branch := strings.TrimPrefix(headRef, "refs/heads/") // e.g. "main"
+		refspec := branch + ":refs/remotes/origin/" + branch // e.g. "main:refs/remotes/origin/main"
 
 		fetchCmd := exec.Command("git", "--git-dir", gitDir, "fetch", "--depth", "1", "origin", refspec)
 		fetchCmd.Stderr = &stderr
@@ -484,10 +484,10 @@ func (g *Git) CommitAll(message string) error {
 
 // GitStatus represents the status of the working directory.
 type GitStatus struct {
-	Clean    bool
-	Modified []string
-	Added    []string
-	Deleted  []string
+	Clean     bool
+	Modified  []string
+	Added     []string
+	Deleted   []string
 	Untracked []string
 }
 
@@ -946,6 +946,23 @@ func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
 	return true, nil
 }
 
+// BranchMergedInto checks if sourceBranch is already merged into targetBranch.
+// Returns true if sourceBranch's commits are contained in targetBranch.
+// This is useful for detecting external merges (branches merged outside the refinery).
+func (g *Git) BranchMergedInto(sourceBranch, targetBranch string) (bool, error) {
+	// Use git merge-base --is-ancestor to check if source is ancestor of target
+	// If source is ancestor of target, then source has been merged into target
+	_, err := g.run("merge-base", "--is-ancestor", sourceBranch, targetBranch)
+	if err != nil {
+		// Exit code 1 means source is NOT an ancestor of target (not merged)
+		if strings.Contains(err.Error(), "exit status 1") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // WorktreeAdd creates a new worktree at the given path with a new branch.
 // The new branch is created from the current HEAD.
 // Skips LFS smudge filter during checkout (see WorktreeAddFromRef).
@@ -1242,8 +1259,8 @@ type UncommittedWorkStatus struct {
 	StashCount            int
 	UnpushedCommits       int
 	// Details for error messages
-	ModifiedFiles   []string
-	UntrackedFiles  []string
+	ModifiedFiles  []string
+	UntrackedFiles []string
 }
 
 // Clean returns true if there is no uncommitted work.
