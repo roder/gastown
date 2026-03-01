@@ -433,7 +433,7 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create and start Propeller for state change notifications
-	propeller := acp.NewPropeller(proxy, store)
+	propeller := acp.NewPropeller(proxy, store, townRoot, session.MayorSessionName())
 	if store != nil {
 		propeller.Start(ctx)
 		defer func() {

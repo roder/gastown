@@ -11,7 +11,7 @@ import (
 
 func TestNewPropeller(t *testing.T) {
 	proxy := NewProxy()
-	prop := NewPropeller(proxy, nil)
+	prop := NewPropeller(proxy, nil, "", "")
 
 	if prop.proxy != proxy {
 		t.Error("proxy not set correctly")
@@ -22,7 +22,7 @@ func TestNewPropeller(t *testing.T) {
 }
 
 func TestPropeller_StateTracking(t *testing.T) {
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	key := "bead:gt-123"
 
@@ -135,7 +135,7 @@ func TestPropeller_FormatNotification(t *testing.T) {
 		},
 	}
 
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -148,7 +148,7 @@ func TestPropeller_FormatNotification(t *testing.T) {
 }
 
 func TestPropeller_StartStop(t *testing.T) {
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -161,7 +161,7 @@ func TestPropeller_StartStop(t *testing.T) {
 }
 
 func TestPropeller_DetectChangesWithNilStore(t *testing.T) {
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	ctx := context.Background()
 	changes := prop.detectChanges(ctx)
@@ -190,7 +190,7 @@ func TestPropeller_DetectBeadChanges(t *testing.T) {
 		},
 	}
 
-	prop := NewPropeller(nil, mock)
+	prop := NewPropeller(nil, mock, "", "")
 	ctx := context.Background()
 
 	changes := prop.detectChanges(ctx)
@@ -228,7 +228,7 @@ func TestPropeller_DetectConvoyChanges(t *testing.T) {
 		},
 	}
 
-	prop := NewPropeller(nil, mock)
+	prop := NewPropeller(nil, mock, "", "")
 	ctx := context.Background()
 
 	changes := prop.detectChanges(ctx)
@@ -260,7 +260,7 @@ func TestPropeller_DetectPolecatChanges(t *testing.T) {
 		},
 	}
 
-	prop := NewPropeller(nil, mock)
+	prop := NewPropeller(nil, mock, "", "")
 	ctx := context.Background()
 
 	changes := prop.detectChanges(ctx)
@@ -288,7 +288,7 @@ func TestPropeller_DetectPolecatChanges(t *testing.T) {
 }
 
 func TestPropeller_NotifyChange(t *testing.T) {
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	change := stateChange{
 		entityType: "bead",
@@ -301,7 +301,7 @@ func TestPropeller_NotifyChange(t *testing.T) {
 }
 
 func TestPropeller_ConcurrentAccess(t *testing.T) {
-	prop := NewPropeller(nil, nil)
+	prop := NewPropeller(nil, nil, "", "")
 
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {

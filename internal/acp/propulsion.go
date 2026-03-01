@@ -11,6 +11,7 @@ import (
 	"time"
 
 	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/nudge"
 )
 
 const pollInterval = 30 * time.Second
@@ -35,6 +36,8 @@ type mailMessage struct {
 type Propeller struct {
 	proxy      *Proxy
 	store      beadsdk.Storage
+	townRoot   string
+	session    string
 	lastSeen   map[string]string
 	lastSeenMu sync.RWMutex
 	ctx        context.Context
@@ -46,10 +49,12 @@ type Propeller struct {
 	hookMu     sync.RWMutex
 }
 
-func NewPropeller(proxy *Proxy, store beadsdk.Storage) *Propeller {
+func NewPropeller(proxy *Proxy, store beadsdk.Storage, townRoot, session string) *Propeller {
 	return &Propeller{
 		proxy:    proxy,
 		store:    store,
+		townRoot: townRoot,
+		session:  session,
 		lastSeen: make(map[string]string),
 		mailIDs:  make(map[string]mailMessage),
 	}
@@ -96,6 +101,7 @@ func (p *Propeller) pollOnce() {
 
 	p.detectMailChanges(ctx)
 	p.detectHookChanges(ctx)
+	p.detectNudges(ctx)
 }
 
 func (p *Propeller) detectChanges(ctx context.Context) []stateChange {
@@ -435,4 +441,53 @@ func (p *Propeller) notifyWithMeta(text string, meta map[string]string) {
 	}
 
 	_ = p.proxy.InjectNotification("session/update", params)
+}
+
+func (p *Propeller) detectNudges(ctx context.Context) {
+	if p.townRoot == "" || p.session == "" {
+		return
+	}
+
+	nudges, err := nudge.Drain(p.townRoot, p.session)
+	if err != nil || len(nudges) == 0 {
+		return
+	}
+
+	var urgent, normal []nudge.QueuedNudge
+	for _, n := range nudges {
+		if n.Priority == nudge.PriorityUrgent {
+			urgent = append(urgent, n)
+		} else {
+			normal = append(normal, n)
+		}
+	}
+
+	var text string
+	if len(urgent) > 0 {
+		text = fmt.Sprintf("🚨 NUDGE (%d urgent): ", len(urgent))
+		for i, n := range urgent {
+			if i > 0 {
+				text += " | "
+			}
+			text += fmt.Sprintf("[%s] %s", n.Sender, n.Message)
+		}
+		if len(normal) > 0 {
+			text += fmt.Sprintf(" (+%d other)", len(normal))
+		}
+	} else {
+		text = fmt.Sprintf("📨 NUDGE from %s: %s", nudges[0].Sender, nudges[0].Message)
+		if len(nudges) > 1 {
+			text += fmt.Sprintf(" (+%d more)", len(nudges)-1)
+		}
+	}
+
+	meta := map[string]string{
+		"gt/eventType": "nudge",
+		"gt/count":     strconv.Itoa(len(nudges)),
+		"gt/urgent":    strconv.Itoa(len(urgent)),
+		"gt/drained":   "true",
+		"gt/session":   p.session,
+	}
+
+	p.notifyWithMeta(text, meta)
 }
