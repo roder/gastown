@@ -88,6 +88,7 @@ func (p *Propeller) detectMailChanges(ctx context.Context) {
 	cmd := exec.CommandContext(ctx, "gt", "mail", "inbox", "--identity", "mayor/", "--json")
 	output, err := cmd.Output()
 	if err != nil {
+		fmt.Printf("[Propeller] detectMailChanges: command error: %v\n", err)
 		return
 	}
 
@@ -101,6 +102,7 @@ func (p *Propeller) detectMailChanges(ctx context.Context) {
 	}
 
 	if err := json.Unmarshal(output, &mailResp); err != nil {
+		fmt.Printf("[Propeller] detectMailChanges: JSON parse error: %v\n", err)
 		return
 	}
 
@@ -235,11 +237,16 @@ func (p *Propeller) notifyWithMeta(text string, meta map[string]string) {
 
 func (p *Propeller) detectNudges(ctx context.Context) {
 	if p.townRoot == "" || p.session == "" {
+		fmt.Printf("[Propeller] detectNudges: early return - townRoot=%q session=%q\n", p.townRoot, p.session)
 		return
 	}
 
 	nudges, err := nudge.Drain(p.townRoot, p.session)
-	if err != nil || len(nudges) == 0 {
+	if err != nil {
+		fmt.Printf("[Propeller] detectNudges: Drain error: %v\n", err)
+		return
+	}
+	if len(nudges) == 0 {
 		return
 	}
 
