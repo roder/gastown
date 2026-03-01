@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -20,6 +24,52 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+func hasACPSessionByName(townRoot, sessionName string) bool {
+	if townRoot == "" {
+		return false
+	}
+
+	switch {
+	case sessionName == session.MayorSessionName():
+		return mayor.IsACPActive(townRoot)
+	case strings.HasPrefix(sessionName, "hq-"):
+		return false
+	default:
+		parts := strings.SplitN(sessionName, "-", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		rigPrefix := parts[0]
+		polecatName := parts[1]
+
+		rigName := session.DefaultRegistry().RigForPrefix(rigPrefix)
+		if rigName == "" {
+			return false
+		}
+
+		pidPath := filepath.Join(townRoot, rigName, "polecats", polecatName, "polecat-acp.pid")
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			return false
+		}
+		pidStr := strings.TrimSpace(string(data))
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
+			return false
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return false
+		}
+		err = process.Signal(syscall.Signal(0))
+		if err != nil {
+			_ = os.Remove(pidPath)
+			return false
+		}
+		return true
+	}
+}
 
 var (
 	nudgeMessageFlag  string
@@ -406,12 +456,19 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
 	} else {
 		// Raw session name (legacy)
-		exists, err := t.HasSession(target)
-		if err != nil {
-			return fmt.Errorf("checking session: %w", err)
-		}
-		if !exists {
-			return fmt.Errorf("session %q not found", target)
+		// Check for ACP session - ACP agents don't have tmux sessions but can receive nudges via queue
+		townRoot, _ := workspace.FindFromCwd()
+		hasACP := hasACPSessionByName(townRoot, target)
+		canQueue := nudgeModeFlag == NudgeModeQueue || nudgeModeFlag == NudgeModeWaitIdle
+
+		if !hasACP || !canQueue {
+			exists, err := t.HasSession(target)
+			if err != nil {
+				return fmt.Errorf("checking session: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("session %q not found", target)
+			}
 		}
 
 		if err := deliverNudge(t, target, message, sender); err != nil {
@@ -546,6 +603,7 @@ func runNudgeChannel(channelName, message, sender string) error {
 //   - Wildcard: "gastown/polecats/*" → all polecat sessions in gastown
 //   - Role: "*/witness" → all witness sessions
 //   - Special: "mayor", "deacon" → gt-{town}-mayor, gt-{town}-deacon
+//
 // townName is used to generate the correct session names for mayor/deacon.
 func resolveNudgePattern(pattern string, agents []*AgentSession) []string {
 	var results []string
