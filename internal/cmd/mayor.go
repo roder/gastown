@@ -371,6 +371,14 @@ func runMayorAcp(cmd *cobra.Command, args []string) error {
 
 	ensureMayorInfra(townRoot)
 
+	mayormgr := mayor.NewManager(townRoot)
+	if running, _ := mayormgr.IsRunning(); running {
+		fmt.Fprintf(os.Stderr, "Stopping tmux mayor to switch to ACP mode...\n")
+		if err := mayormgr.Stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not stop tmux mayor: %v\n", err)
+		}
+	}
+
 	rigName := acpRigOverride
 	if rigName == "" {
 		rigName = os.Getenv("GT_RIG")
