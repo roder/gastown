@@ -110,10 +110,12 @@ func findActivePatrol(cfg PatrolConfig) (patrolID, patrolLine string, found bool
 // Returns an error if the child listing fails, so the caller can avoid
 // destructive cleanup on transient failures.
 //
-// A parent with zero children is treated as "has open children" (returns true)
-// to protect against a race where a freshly created wisp hasn't had its step
-// children materialized yet. This prevents findActivePatrol from closing a
-// just-created patrol during the window between root creation and step population.
+// A parent with zero children is treated as follows:
+// - If parent status is closed: returns false (inactive)
+// - If parent status is open/in_progress/hooked: returns true (active, still materializing)
+//
+// This handles both the race condition for newly created wisps AND root-only
+// wisps that never have children.
 func checkHasOpenChildren(b *beads.Beads, parentID string) (bool, error) {
 	children, err := b.List(beads.ListOptions{
 		Parent:   parentID,
@@ -123,10 +125,15 @@ func checkHasOpenChildren(b *beads.Beads, parentID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// Zero children means the wisp may still be materializing steps —
-	// treat as active to avoid destroying a just-created patrol.
+	// Zero children: check parent status to determine if active
+	// Root-only wisps never have children, so we must check parent status
 	if len(children) == 0 {
-		return true, nil
+		parent, err := b.Show(parentID)
+		if err != nil {
+			return false, err
+		}
+		// If parent is closed, it's inactive; otherwise treat as active (materializing)
+		return parent.Status != "closed", nil
 	}
 	for _, child := range children {
 		if child.Status != "closed" {
