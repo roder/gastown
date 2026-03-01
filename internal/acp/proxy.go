@@ -221,6 +221,8 @@ func (p *Proxy) forwardFromAgent() {
 		p.extractSessionID(&msg)
 		shouldInjectPrompt := p.trackHandshakeResponse(&msg)
 
+		p.handleToolCallNotification(&msg, encoder)
+
 		if err := encoder.Encode(&msg); err != nil {
 			p.markDone()
 			return
@@ -231,6 +233,77 @@ func (p *Proxy) forwardFromAgent() {
 				fmt.Fprintf(os.Stderr, "failed to inject startup prompt: %v\n", err)
 			}
 		}
+	}
+}
+
+func (p *Proxy) handleToolCallNotification(msg *JSONRPCMessage, encoder *json.Encoder) {
+	if msg.Method != "session/update" || msg.Params == nil {
+		return
+	}
+
+	var params struct {
+		SessionID string          `json:"sessionId"`
+		Update    json.RawMessage `json:"update"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		return
+	}
+
+	var update map[string]json.RawMessage
+	if err := json.Unmarshal(params.Update, &update); err != nil {
+		return
+	}
+
+	toolCallRaw, ok := update["ToolCall"]
+	if !ok {
+		return
+	}
+
+	var toolCall struct {
+		ToolCallID string `json:"tool_call_id"`
+		Fields     struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text,omitempty"`
+			} `json:"content,omitempty"`
+			Status string `json:"status,omitempty"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(toolCallRaw, &toolCall); err != nil {
+		return
+	}
+
+	if len(toolCall.Fields.Content) == 0 {
+		return
+	}
+
+	updateParams := map[string]any{
+		"sessionId": p.SessionID(),
+		"update": map[string]any{
+			"ToolCallUpdate": map[string]any{
+				"tool_call_id": toolCall.ToolCallID,
+				"fields": map[string]any{
+					"content": toolCall.Fields.Content,
+					"status":  "completed",
+				},
+			},
+		},
+	}
+
+	updateMsg := JSONRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "session/update",
+	}
+
+	rawParams, err := json.Marshal(updateParams)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to marshal ToolCallUpdate params: %v\n", err)
+		return
+	}
+	updateMsg.Params = rawParams
+
+	if err := encoder.Encode(&updateMsg); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to send ToolCallUpdate notification: %v\n", err)
 	}
 }
 

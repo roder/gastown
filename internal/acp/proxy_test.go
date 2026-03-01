@@ -654,3 +654,118 @@ func createTempScript(t *testing.T, content string) string {
 
 	return tmpFile.Name()
 }
+
+func TestProxy_HandleToolCallNotification(t *testing.T) {
+	tests := []struct {
+		name           string
+		inputMsg       *JSONRPCMessage
+		expectUpdate   bool
+		expectedToolID string
+	}{
+		{
+			name: "ToolCall with content triggers ToolCallUpdate",
+			inputMsg: &JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  json.RawMessage(`{"sessionId":"test-session","update":{"ToolCall":{"tool_call_id":"tool-123","fields":{"content":[{"type":"text","text":"command output"}],"status":"in_progress"}}}}`),
+			},
+			expectUpdate:   true,
+			expectedToolID: "tool-123",
+		},
+		{
+			name: "ToolCall without content does not trigger update",
+			inputMsg: &JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  json.RawMessage(`{"sessionId":"test-session","update":{"ToolCall":{"tool_call_id":"tool-456","fields":{"status":"in_progress"}}}}`),
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "non-session/update message is ignored",
+			inputMsg: &JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/prompt",
+				Params:  json.RawMessage(`{"sessionId":"test-session"}`),
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "AgentMessageChunk is ignored",
+			inputMsg: &JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  json.RawMessage(`{"sessionId":"test-session","update":{"AgentMessageChunk":{"content":{"type":"text","text":"hello"}}}}`),
+			},
+			expectUpdate: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewProxy()
+			p.sessionMux.Lock()
+			p.sessionID = "test-session"
+			p.sessionMux.Unlock()
+
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("failed to create pipe: %v", err)
+			}
+			defer r.Close()
+
+			encoder := json.NewEncoder(w)
+
+			p.handleToolCallNotification(tt.inputMsg, encoder)
+			w.Close()
+
+			if !tt.expectUpdate {
+				var buf bytes.Buffer
+				io.Copy(&buf, r)
+				if buf.Len() > 0 {
+					t.Errorf("expected no ToolCallUpdate, but got output: %s", buf.String())
+				}
+				return
+			}
+
+			var buf bytes.Buffer
+			io.Copy(&buf, r)
+
+			if buf.Len() == 0 {
+				t.Fatal("expected ToolCallUpdate notification, got nothing")
+			}
+
+			var msg JSONRPCMessage
+			if err := json.Unmarshal(buf.Bytes(), &msg); err != nil {
+				t.Fatalf("failed to parse ToolCallUpdate: %v", err)
+			}
+
+			if msg.Method != "session/update" {
+				t.Errorf("expected method session/update, got %q", msg.Method)
+			}
+
+			var params struct {
+				Update map[string]json.RawMessage `json:"update"`
+			}
+			if err := json.Unmarshal(msg.Params, &params); err != nil {
+				t.Fatalf("failed to parse params: %v", err)
+			}
+
+			updateRaw, ok := params.Update["ToolCallUpdate"]
+			if !ok {
+				t.Fatal("expected ToolCallUpdate in update")
+			}
+
+			var toolCallUpdate struct {
+				ToolCallID string `json:"tool_call_id"`
+			}
+			if err := json.Unmarshal(updateRaw, &toolCallUpdate); err != nil {
+				t.Fatalf("failed to parse ToolCallUpdate: %v", err)
+			}
+
+			if toolCallUpdate.ToolCallID != tt.expectedToolID {
+				t.Errorf("expected tool_call_id %q, got %q", tt.expectedToolID, toolCallUpdate.ToolCallID)
+			}
+		})
+	}
+}
