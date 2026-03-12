@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/nudge"
 )
 
 func TestNewPropeller(t *testing.T) {
@@ -64,5 +66,50 @@ func TestPropeller_EventLoop_Cancellation(t *testing.T) {
 		// Success
 	case <-time.After(1 * time.Second):
 		t.Error("eventLoop did not exit after context cancellation")
+	}
+}
+
+func TestPropeller_DeliverNudges_RequeuesWhenSessionUnavailable(t *testing.T) {
+	townRoot := t.TempDir()
+	proxy := NewProxy()
+	prop := NewPropeller(proxy, townRoot, "hq-mayor")
+
+	if err := nudge.Enqueue(townRoot, "hq-mayor", nudge.QueuedNudge{
+		Sender:   "witness",
+		Message:  "Escalation pending",
+		Priority: nudge.PriorityUrgent,
+	}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	prop.deliverNudges()
+
+	pending, err := nudge.Pending(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("expected requeued nudge to remain pending, got %d", pending)
+	}
+
+	drained, err := nudge.Drain(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(drained) != 1 {
+		t.Fatalf("expected 1 requeued nudge, got %d", len(drained))
+	}
+	if drained[0].Priority != nudge.PriorityUrgent {
+		t.Fatalf("priority = %q, want %q", drained[0].Priority, nudge.PriorityUrgent)
+	}
+}
+
+func TestPropeller_NotifyReturnsErrorWithoutSessionID(t *testing.T) {
+	proxy := NewProxy()
+	prop := NewPropeller(proxy, t.TempDir(), "hq-mayor")
+
+	err := prop.notify("test message", map[string]string{"gt/eventType": "nudge"}, true)
+	if err == nil {
+		t.Fatal("expected notify to fail when sessionID is unavailable")
 	}
 }

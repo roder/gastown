@@ -134,6 +134,21 @@ func Enqueue(townRoot, session string, nudge QueuedNudge) error {
 	return nil
 }
 
+// Requeue writes previously drained nudges back to the queue for later delivery.
+// Existing timestamps are preserved so FIFO ordering remains stable relative to
+// one another; only expired nudges are skipped.
+func Requeue(townRoot, session string, nudges []QueuedNudge) error {
+	for _, n := range nudges {
+		if !n.ExpiresAt.IsZero() && time.Now().After(n.ExpiresAt) {
+			continue
+		}
+		if err := Enqueue(townRoot, session, n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Drain reads and removes all queued nudges for a session, returning them
 // in FIFO order. This is called by the hook to pick up pending nudges.
 //

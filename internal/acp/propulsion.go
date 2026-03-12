@@ -233,8 +233,22 @@ func (p *Propeller) deliverNudges() {
 		}
 	}
 	meta["gt/urgent"] = strconv.Itoa(urgentCount)
+	requeue := func(reason string) {
+		if err := nudge.Requeue(p.townRoot, p.session, nudges); err != nil {
+			logEvent(p.townRoot, "acp_error", fmt.Sprintf("failed to requeue nudges after %s: %v", reason, err))
+			style.PrintWarning("ACP Propeller failed to requeue nudges after %s: %v", reason, err)
+			return
+		}
+		logEvent(p.townRoot, "acp_degraded", fmt.Sprintf("requeued %d nudges: %s", len(nudges), reason))
+	}
+
+	if p.proxy == nil || p.proxy.SessionID() == "" {
+		requeue("session not ready")
+		return
+	}
 
 	if err := p.notify(text, meta, urgent); err != nil {
+		requeue(fmt.Sprintf("delivery failure: %v", err))
 		style.PrintWarning("ACP Propeller failed to deliver nudge: %v", err)
 	}
 }
@@ -290,6 +304,9 @@ func (p *Propeller) notifyWithMeta(text string, meta map[string]string) {
 func (p *Propeller) notify(text string, meta map[string]string, urgent bool) error {
 	if p.proxy == nil || text == "" {
 		return nil
+	}
+	if p.proxy.SessionID() == "" {
+		return fmt.Errorf("sessionID not available")
 	}
 
 	// Always notify the UI
