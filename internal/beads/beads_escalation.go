@@ -13,22 +13,21 @@ import (
 // EscalationFields holds structured fields for escalation beads.
 // These are stored as "key: value" lines in the description.
 type EscalationFields struct {
-	Severity           string // critical, high, medium, low
-	Reason             string // Why this was escalated
-	Source             string // Source identifier (e.g., plugin:rebuild-gt, patrol:deacon)
-	EscalatedBy        string // Agent address that escalated (e.g., "gastown/Toast")
-	EscalatedAt        string // ISO 8601 timestamp
-	AckedBy            string // Agent that acknowledged (empty if not acked)
-	AckedAt            string // When acknowledged (empty if not acked)
-	ClosedBy           string // Agent that closed (empty if not closed)
-	ClosedReason       string // Resolution reason (empty if not closed)
-	RelatedBead        string // Optional: related bead ID (task, bug, etc.)
-	OriginalSeverity   string // Original severity before any re-escalation
-	ReescalationCount  int    // Number of times this has been re-escalated
-	LastReescalatedAt  string // When last re-escalated (empty if never)
-	LastReescalatedBy  string // Who last re-escalated (empty if never)
+	Severity          string // critical, high, medium, low
+	Reason            string // Why this was escalated
+	Source            string // Source identifier (e.g., plugin:rebuild-gt, patrol:deacon)
+	EscalatedBy       string // Agent address that escalated (e.g., "gastown/Toast")
+	EscalatedAt       string // ISO 8601 timestamp
+	AckedBy           string // Agent that acknowledged (empty if not acked)
+	AckedAt           string // When acknowledged (empty if not acked)
+	ClosedBy          string // Agent that closed (empty if not closed)
+	ClosedReason      string // Resolution reason (empty if not closed)
+	RelatedBead       string // Optional: related bead ID (task, bug, etc.)
+	OriginalSeverity  string // Original severity before any re-escalation
+	ReescalationCount int    // Number of times this has been re-escalated
+	LastReescalatedAt string // When last re-escalated (empty if never)
+	LastReescalatedBy string // Who last re-escalated (empty if never)
 }
-
 
 // FormatEscalationDescription creates a description string from escalation fields.
 func FormatEscalationDescription(title string, fields *EscalationFields) string {
@@ -158,8 +157,55 @@ func ParseEscalationFields(description string) *EscalationFields {
 	return fields
 }
 
+// DurabilityPolicy defines when escalation beads should be durable vs ephemeral.
+// This policy ensures high/critical incidents are auditable while low/medium noise
+// remains ephemeral to avoid cluttering persistent storage.
+//
+// Durability Levels:
+//   - EPHEMERAL: Stored in wisps table, not synced to git, may be garbage collected
+//   - DURABLE: Stored in issues table, synced to git, permanent audit trail
+//
+// Severity Mapping:
+//   - low:       EPHEMERAL (operational noise, temporary)
+//   - medium:    EPHEMERAL (operational noise, temporary)
+//   - high:      DURABLE (significant incidents requiring audit trail)
+//   - critical:  DURABLE (severe incidents requiring permanent record)
+//   - unknown:   DURABLE (default to safe choice - preserve data)
+//
+// Rationale:
+//
+//	High and critical incidents need durable storage for:
+//	- Post-incident reviews and analysis
+//	- Compliance and audit requirements
+//	- Historical trend analysis
+//	- References in other beads or documentation
+//
+//	Low and medium incidents are typically operational noise that:
+//	- Resolve quickly without follow-up
+//	- Don't require long-term audit trails
+//	- Can be ephemeral to reduce storage overhead
+const (
+	EphemeralDurability = "ephemeral"
+	DurableDurability   = "durable"
+)
+
+// getDurabilityLevel determines the durability level for an escalation based on severity.
+// Returns "ephemeral" for low/medium severity, "durable" for high/critical/unknown.
+func getDurabilityLevel(severity string) string {
+	switch strings.ToLower(severity) {
+	case "low", "medium":
+		return EphemeralDurability
+	case "high", "critical":
+		return DurableDurability
+	default:
+		// Unknown or empty severity defaults to durable for safety
+		return DurableDurability
+	}
+}
+
 // CreateEscalationBead creates an escalation bead for tracking escalations.
 // The created_by field is populated from BD_ACTOR env var for provenance tracking.
+// Durability is determined by severity per the durability policy.
 func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(title) {
@@ -172,14 +218,25 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 		"--title=" + title,
 		"--description=" + description,
 		"--type=task",
-		"--ephemeral",
 		"--wisp-type=escalation",
 		"--labels=gt:escalation",
 	}
 
-	// Add severity as a label for easy filtering
+	// Determine durability based on severity per policy
+	severity := ""
 	if fields != nil && fields.Severity != "" {
-		args = append(args, fmt.Sprintf("--labels=severity:%s", fields.Severity))
+		severity = fields.Severity
+	}
+	durability := getDurabilityLevel(severity)
+
+	// Apply ephemeral flag only for ephemeral durability level
+	if durability == EphemeralDurability {
+		args = append(args, "--ephemeral")
+	}
+
+	// Add severity as a label for easy filtering
+	if severity != "" {
+		args = append(args, fmt.Sprintf("--labels=severity:%s", severity))
 	}
 
 	// Default actor from BD_ACTOR env var for provenance tracking

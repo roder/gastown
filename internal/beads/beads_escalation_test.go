@@ -322,3 +322,69 @@ func TestBumpSeverity(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDurabilityLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		severity string
+		want     string
+	}{
+		// Ephemeral cases (low/medium operational noise)
+		{"low severity", "low", EphemeralDurability},
+		{"medium severity", "medium", EphemeralDurability},
+		{"low uppercase", "LOW", EphemeralDurability},
+		{"medium uppercase", "MEDIUM", EphemeralDurability},
+
+		// Durable cases (high/critical incidents)
+		{"high severity", "high", DurableDurability},
+		{"critical severity", "critical", DurableDurability},
+		{"high uppercase", "HIGH", DurableDurability},
+		{"critical uppercase", "CRITICAL", DurableDurability},
+
+		// Unknown/default cases (should be durable for safety)
+		{"unknown severity", "unknown", DurableDurability},
+		{"empty severity", "", DurableDurability},
+		{"random severity", "random", DurableDurability},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := getDurabilityLevel(tt.severity)
+			if got != tt.want {
+				t.Errorf("getDurabilityLevel(%q) = %q, want %q", tt.severity, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDurabilityPolicyDocumentation(t *testing.T) {
+	// Verify the policy constants are defined
+	if EphemeralDurability != "ephemeral" {
+		t.Errorf("EphemeralDurability = %q, want %q", EphemeralDurability, "ephemeral")
+	}
+	if DurableDurability != "durable" {
+		t.Errorf("DurableDurability = %q, want %q", DurableDurability, "durable")
+	}
+
+	// Test policy behavior matches requirements:
+	// Low/medium -> ephemeral (operational noise)
+	// High/critical -> durable (auditable incidents)
+
+	lowLevel := getDurabilityLevel("low")
+	mediumLevel := getDurabilityLevel("medium")
+	highLevel := getDurabilityLevel("high")
+	criticalLevel := getDurabilityLevel("critical")
+
+	if lowLevel != EphemeralDurability {
+		t.Errorf("low severity should be ephemeral, got %q", lowLevel)
+	}
+	if mediumLevel != EphemeralDurability {
+		t.Errorf("medium severity should be ephemeral, got %q", mediumLevel)
+	}
+	if highLevel != DurableDurability {
+		t.Errorf("high severity should be durable, got %q", highLevel)
+	}
+	if criticalLevel != DurableDurability {
+		t.Errorf("critical severity should be durable, got %q", criticalLevel)
+	}
+}
