@@ -217,6 +217,28 @@ func (r *Router) ensureCustomTypes(beadsDir string) error {
 	return nil
 }
 
+func (r *Router) buildLabels(msg *Message) []string {
+	var labels []string
+	labels = append(labels, "gt:message")
+	if msg.Type == TypeEscalation {
+		labels = append(labels, "gt:escalation")
+	}
+	labels = append(labels, "from:"+msg.From)
+	labels = append(labels, "msg-type:"+string(msg.Type))
+	labels = append(labels, DeliverySendLabels()...)
+	if msg.ThreadID != "" {
+		labels = append(labels, "thread:"+msg.ThreadID)
+	}
+	if msg.ReplyTo != "" {
+		labels = append(labels, "reply-to:"+msg.ReplyTo)
+	}
+	for _, cc := range msg.CC {
+		ccIdentity := AddressToIdentity(cc)
+		labels = append(labels, "cc:"+ccIdentity)
+	}
+	return labels
+}
+
 // isTownLevelAddress returns true if the address is for a town-level agent or the overseer.
 func isTownLevelAddress(address string) bool {
 	addr := strings.TrimSuffix(address, "/")
@@ -1078,21 +1100,7 @@ func (r *Router) sendToSingle(msg *Message) error {
 	}
 
 	// Build labels for type, from/thread/reply-to/cc
-	var labels []string
-	labels = append(labels, "gt:message")
-	labels = append(labels, "from:"+msg.From)
-	labels = append(labels, DeliverySendLabels()...)
-	if msg.ThreadID != "" {
-		labels = append(labels, "thread:"+msg.ThreadID)
-	}
-	if msg.ReplyTo != "" {
-		labels = append(labels, "reply-to:"+msg.ReplyTo)
-	}
-	// Add CC labels (one per recipient)
-	for _, cc := range msg.CC {
-		ccIdentity := AddressToIdentity(cc)
-		labels = append(labels, "cc:"+ccIdentity)
-	}
+	labels := r.buildLabels(msg)
 
 	// Build command: bd create --assignee=<recipient> -d <body> --labels=gt:message,... -- <subject>
 	// Flags go first, then -- to end flag parsing, then the positional subject.
@@ -1805,4 +1813,3 @@ func AddressToSessionIDs(address string) []string {
 		session.PolecatSessionName(rigPrefix, target), // <prefix>-name
 	}
 }
-

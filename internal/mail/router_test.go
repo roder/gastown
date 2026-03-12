@@ -136,9 +136,9 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"gastown/polecats/nux", []string{"gt-nux"}},
 
 		// Invalid addresses - empty result
-		{"gastown/", nil},  // Empty target
-		{"gastown", nil},   // No slash
-		{"", nil},          // Empty address
+		{"gastown/", nil}, // Empty target
+		{"gastown", nil},  // No slash
+		{"", nil},         // Empty address
 	}
 
 	for _, tt := range tests {
@@ -193,9 +193,9 @@ func TestShouldBeWisp(t *testing.T) {
 	r := &Router{}
 
 	tests := []struct {
-		name    string
-		msg     *Message
-		want    bool
+		name string
+		msg  *Message
+		want bool
 	}{
 		{
 			name: "explicit wisp flag",
@@ -829,9 +829,9 @@ func TestParseGroupAddress(t *testing.T) {
 
 func TestAgentBeadToAddress(t *testing.T) {
 	tests := []struct {
-		name   string
-		bead   *agentBead
-		want   string
+		name string
+		bead *agentBead
+		want string
 	}{
 		{
 			name: "nil bead",
@@ -1620,6 +1620,26 @@ func TestNotifyRecipient_BusyAgent(t *testing.T) {
 	}
 }
 
+func TestRouterSendEscalationAddsStructuredLabels(t *testing.T) {
+	r := &Router{}
+	msg := &Message{From: "deacon/", Type: TypeEscalation, ThreadID: "hq-abc123"}
+	labels := r.buildLabels(msg)
+	for _, want := range []string{"gt:message", "gt:escalation", "msg-type:escalation", "from:deacon/", "thread:hq-abc123"} {
+		if !containsLabel(labels, want) {
+			t.Fatalf("labels %v missing %q", labels, want)
+		}
+	}
+}
+
+func containsLabel(labels []string, want string) bool {
+	for _, label := range labels {
+		if label == want {
+			return true
+		}
+	}
+	return false
+}
+
 // --- enqueueReplyReminder tests ---
 
 // TestEnqueueReplyReminder_Basic verifies that a deferred reply-reminder nudge is
@@ -1751,4 +1771,3 @@ func TestEnqueueReplyReminder_DisabledByConfig(t *testing.T) {
 		t.Errorf("reply_reminder_delay=0s should disable reminders, got %d pending", pending)
 	}
 }
-

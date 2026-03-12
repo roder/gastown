@@ -106,11 +106,12 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	defer router.WaitPendingNotifications()
 	for _, target := range targets {
 		msg := &mail.Message{
-			From:    agentID,
-			To:      target,
-			Subject: fmt.Sprintf("[%s] %s", strings.ToUpper(severity), description),
-			Body:    formatEscalationMailBody(issue.ID, severity, escalateReason, agentID, escalateRelatedBead),
-			Type:    mail.TypeTask,
+			From:     agentID,
+			To:       target,
+			Subject:  fmt.Sprintf("[%s] %s", strings.ToUpper(severity), description),
+			Body:     formatEscalationMailBody(issue.ID, severity, escalateReason, agentID, escalateRelatedBead),
+			Type:     mail.TypeEscalation,
+			ThreadID: issue.ID,
 		}
 
 		// Set priority based on severity
@@ -127,6 +128,22 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 
 		if err := router.Send(msg); err != nil {
 			style.PrintWarning("failed to send to %s: %v", target, err)
+			continue
+		}
+
+		mailBeads := beads.New(beads.ResolveBeadsDir(townRoot))
+		mailIssue, err := mailBeads.FindLatestIssueByTitleAndAssignee(msg.Subject, mail.AddressToIdentity(target))
+		if err != nil {
+			style.PrintWarning("failed to annotate escalation mail for %s: %v", target, err)
+			continue
+		}
+
+		addLabels := []string{
+			fmt.Sprintf("severity:%s", severity),
+			fmt.Sprintf("escalation:%s", issue.ID),
+		}
+		if err := mailBeads.Update(mailIssue.ID, beads.UpdateOptions{AddLabels: addLabels}); err != nil {
+			style.PrintWarning("failed to annotate escalation mail labels for %s: %v", target, err)
 		}
 	}
 
@@ -494,19 +511,19 @@ func runEscalateShow(cmd *cobra.Command, args []string) error {
 
 	if escalateJSON {
 		data := map[string]interface{}{
-			"id":          issue.ID,
-			"title":       issue.Title,
-			"status":      issue.Status,
-			"created_at":  issue.CreatedAt,
-			"severity":    fields.Severity,
-			"reason":      fields.Reason,
-			"escalatedBy": fields.EscalatedBy,
-			"escalatedAt": fields.EscalatedAt,
-			"ackedBy":     fields.AckedBy,
-			"ackedAt":     fields.AckedAt,
-			"closedBy":    fields.ClosedBy,
+			"id":           issue.ID,
+			"title":        issue.Title,
+			"status":       issue.Status,
+			"created_at":   issue.CreatedAt,
+			"severity":     fields.Severity,
+			"reason":       fields.Reason,
+			"escalatedBy":  fields.EscalatedBy,
+			"escalatedAt":  fields.EscalatedAt,
+			"ackedBy":      fields.AckedBy,
+			"ackedAt":      fields.AckedAt,
+			"closedBy":     fields.ClosedBy,
 			"closedReason": fields.ClosedReason,
-			"relatedBead": fields.RelatedBead,
+			"relatedBead":  fields.RelatedBead,
 		}
 		out, _ := json.MarshalIndent(data, "", "  ")
 		fmt.Println(string(out))

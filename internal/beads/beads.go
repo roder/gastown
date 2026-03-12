@@ -1003,6 +1003,36 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	return issues[0], nil
 }
 
+// FindLatestIssueByTitleAndAssignee finds the newest issue matching the given title and assignee.
+func (b *Beads) FindLatestIssueByTitleAndAssignee(title, assignee string) (*Issue, error) {
+	out, err := b.run("list", "--json", "--limit", "0", "--title", title, "--assignee", assignee)
+	if err != nil {
+		return nil, fmt.Errorf("bd list: %w", err)
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd list output: %w", err)
+	}
+	if len(issues) == 0 {
+		return nil, ErrNotFound
+	}
+
+	var newest *Issue
+	for _, issue := range issues {
+		if issue.Title != title || issue.Assignee != assignee {
+			continue
+		}
+		if newest == nil || issue.CreatedAt > newest.CreatedAt {
+			newest = issue
+		}
+	}
+	if newest == nil {
+		return nil, ErrNotFound
+	}
+	return newest, nil
+}
+
 // ShowMultiple fetches multiple issues by ID in a single bd call.
 // Returns a map of ID to Issue. Missing IDs are not included in the map.
 func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {

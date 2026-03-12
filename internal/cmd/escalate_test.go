@@ -293,10 +293,10 @@ func TestDetectSenderFallback(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name    string
-		actor   string
-		role    string
-		want    string
+		name  string
+		actor string
+		role  string
+		want  string
 	}{
 		{
 			name:  "BD_ACTOR takes priority",
@@ -495,6 +495,20 @@ func TestRunEscalateValidation(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestFormatEscalationMailBodyNeutralSubjectStillCarriesStructuredBody(t *testing.T) {
+	body := formatEscalationMailBody("hq-abc123", "high", "Database drift", "deacon/", "gt-xyz")
+	for _, want := range []string{
+		"Escalation ID: hq-abc123",
+		"Severity: high",
+		"From: deacon/",
+		"Related: gt-xyz",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q: %s", want, body)
+		}
+	}
 }
 
 func TestGetNextSeverityMatchesConfig(t *testing.T) {
