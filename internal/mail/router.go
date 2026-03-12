@@ -1633,6 +1633,9 @@ func (r *Router) notifyRecipient(msg *Message) error {
 				Sender:   msg.From,
 				Message:  notification,
 				Priority: priority,
+				Kind:     nudgeKindForMessage(msg),
+				ThreadID: msg.ThreadID,
+				Severity: prioritySeverityLabel(msg.Priority),
 			}); err != nil {
 				return err
 			}
@@ -1654,10 +1657,20 @@ func (r *Router) notifyRecipient(msg *Message) error {
 			Sender:   msg.From,
 			Message:  notification,
 			Priority: nudgePriorityForMailPriority(msg.Priority),
+			Kind:     nudgeKindForMessage(msg),
+			ThreadID: msg.ThreadID,
+			Severity: prioritySeverityLabel(msg.Priority),
 		})
 	}
 
 	return nil // No active session found
+}
+
+func nudgeKindForMessage(msg *Message) string {
+	if msg.Type == TypeEscalation {
+		return "escalation"
+	}
+	return "mail"
 }
 
 func nudgePriorityForMailPriority(priority Priority) string {

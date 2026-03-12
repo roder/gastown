@@ -206,8 +206,7 @@ func (p *Propeller) deliverNudges() {
 
 	debugLog(p.townRoot, "[Propeller] deliverNudges: drained %d nudge(s)", len(nudges))
 
-	// Use the shared formatter from nudge package
-	text := nudge.FormatForInjection(nudges)
+	text := formatNudgesForPropeller(nudges)
 
 	// Determine urgency
 	urgent := false
@@ -218,21 +217,7 @@ func (p *Propeller) deliverNudges() {
 		}
 	}
 
-	meta := map[string]string{
-		"gt/eventType": "nudge",
-		"gt/count":     strconv.Itoa(len(nudges)),
-		"gt/urgent":    strconv.Itoa(len(nudges) - len(nudges)), // count of urgent? No, just flag it.
-		"gt/drained":   "true",
-		"gt/session":   p.session,
-	}
-	// Actually, let's count urgent
-	urgentCount := 0
-	for _, n := range nudges {
-		if n.Priority == nudge.PriorityUrgent {
-			urgentCount++
-		}
-	}
-	meta["gt/urgent"] = strconv.Itoa(urgentCount)
+	meta := buildSessionUpdateMeta(nudges, p.session)
 	requeue := func(reason string) {
 		if err := nudge.Requeue(p.townRoot, p.session, nudges); err != nil {
 			logEvent(p.townRoot, "acp_error", fmt.Sprintf("failed to requeue nudges after %s: %v", reason, err))
@@ -251,6 +236,53 @@ func (p *Propeller) deliverNudges() {
 		requeue(fmt.Sprintf("delivery failure: %v", err))
 		style.PrintWarning("ACP Propeller failed to deliver nudge: %v", err)
 	}
+}
+
+type escalationDeliveryMeta struct {
+	Kind     string
+	ThreadID string
+	Severity string
+}
+
+func escalationMetaFromNudges(nudges []nudge.QueuedNudge) *escalationDeliveryMeta {
+	for _, n := range nudges {
+		if n.Kind != "escalation" {
+			continue
+		}
+		return &escalationDeliveryMeta{
+			Kind:     n.Kind,
+			ThreadID: n.ThreadID,
+			Severity: n.Severity,
+		}
+	}
+	return nil
+}
+
+func formatNudgesForPropeller(nudges []nudge.QueuedNudge) string {
+	return nudge.FormatForInjection(nudges)
+}
+
+func buildSessionUpdateMeta(nudges []nudge.QueuedNudge, session string) map[string]string {
+	meta := map[string]string{
+		"gt/eventType": "nudge",
+		"gt/count":     strconv.Itoa(len(nudges)),
+		"gt/drained":   "true",
+		"gt/session":   session,
+	}
+	urgentCount := 0
+	for _, n := range nudges {
+		if n.Priority == nudge.PriorityUrgent {
+			urgentCount++
+		}
+	}
+	meta["gt/urgent"] = strconv.Itoa(urgentCount)
+	if escalationMeta := escalationMetaFromNudges(nudges); escalationMeta != nil {
+		meta["gt/escalation"] = "true"
+		meta["gt/threadID"] = escalationMeta.ThreadID
+		meta["gt/severity"] = escalationMeta.Severity
+		meta["gt/kind"] = escalationMeta.Kind
+	}
+	return meta
 }
 
 func (p *Propeller) Stop() {

@@ -1,7 +1,10 @@
 package acp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -111,5 +114,78 @@ func TestPropeller_NotifyReturnsErrorWithoutSessionID(t *testing.T) {
 	err := prop.notify("test message", map[string]string{"gt/eventType": "nudge"}, true)
 	if err == nil {
 		t.Fatal("expected notify to fail when sessionID is unavailable")
+	}
+}
+
+func TestEscalationMetaFromNudges_MetadataDriven(t *testing.T) {
+	nudges := []nudge.QueuedNudge{
+		{Sender: "witness", Message: "Helpful document about urgent migrations", Priority: nudge.PriorityNormal, Kind: "mail"},
+		{Sender: "witness", Message: "Neutral text", Priority: nudge.PriorityUrgent, Kind: "escalation", ThreadID: "hq-esc789", Severity: "critical"},
+	}
+
+	meta := escalationMetaFromNudges(nudges)
+	if meta == nil {
+		t.Fatal("expected escalation metadata")
+	}
+	if meta.Kind != "escalation" || meta.ThreadID != "hq-esc789" || meta.Severity != "critical" {
+		t.Fatalf("unexpected escalation meta: %#v", meta)
+	}
+}
+
+func TestEscalationMetaFromNudges_IgnoresHeuristicText(t *testing.T) {
+	nudges := []nudge.QueuedNudge{
+		{Sender: "witness", Message: "Urgent migration doc that is helpful", Priority: nudge.PriorityUrgent, Kind: "mail"},
+	}
+
+	if meta := escalationMetaFromNudges(nudges); meta != nil {
+		t.Fatalf("expected no escalation metadata for generic mail, got %#v", meta)
+	}
+}
+
+func TestBuildSessionUpdateMetaAddsEscalationFields(t *testing.T) {
+	nudges := []nudge.QueuedNudge{{Sender: "witness", Message: "neutral", Priority: nudge.PriorityUrgent, Kind: "escalation", ThreadID: "hq-esc999", Severity: "critical"}}
+	meta := buildSessionUpdateMeta(nudges, "hq-mayor")
+	if meta["gt/escalation"] != "true" || meta["gt/threadID"] != "hq-esc999" || meta["gt/severity"] != "critical" || meta["gt/kind"] != "escalation" {
+		t.Fatalf("unexpected meta: %#v", meta)
+	}
+}
+
+func TestNotifyWithMetaInjectsEscalationMetadataToUI(t *testing.T) {
+	p := NewProxy()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	defer r.Close()
+	p.setStreams(nil, w)
+	p.sessionMux.Lock()
+	p.sessionID = "test-session"
+	p.sessionMux.Unlock()
+
+	prop := NewPropeller(p, t.TempDir(), "hq-mayor")
+	meta := map[string]string{"gt/eventType": "nudge", "gt/escalation": "true", "gt/threadID": "hq-esc777", "gt/severity": "high"}
+
+	go func() {
+		prop.notifyWithMeta("Escalation text", meta)
+		w.Close()
+	}()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatalf("failed to read pipe: %v", err)
+	}
+
+	var msg JSONRPCMessage
+	if err := json.Unmarshal(buf.Bytes(), &msg); err != nil {
+		t.Fatalf("failed to parse message: %v", err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatalf("failed to parse params: %v", err)
+	}
+	update := params["update"].(map[string]any)
+	metaAny := update["_meta"].(map[string]any)
+	if metaAny["gt/escalation"] != "true" || metaAny["gt/threadID"] != "hq-esc777" || metaAny["gt/severity"] != "high" {
+		t.Fatalf("unexpected injected _meta: %#v", metaAny)
 	}
 }

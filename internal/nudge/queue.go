@@ -60,6 +60,9 @@ type QueuedNudge struct {
 	Sender    string    `json:"sender"`
 	Message   string    `json:"message"`
 	Priority  string    `json:"priority"`
+	Kind      string    `json:"kind,omitempty"`
+	ThreadID  string    `json:"thread_id,omitempty"`
+	Severity  string    `json:"severity,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	// DeliverAfter, if non-zero, defers delivery until this time has passed.
