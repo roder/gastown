@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -89,6 +90,49 @@ func TestExtractMailTargetsFromActions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExecuteExternalActionsReportsWarningsAndFailures(t *testing.T) {
+	townRoot := t.TempDir()
+	statuses := executeExternalActions([]string{"email:human", "log"}, &config.EscalationConfig{}, "hq-esc1", "high", "desc", townRoot)
+	if len(statuses) != 2 {
+		t.Fatalf("expected 2 statuses, got %d", len(statuses))
+	}
+	if statuses[0].Channel != "email" || statuses[0].Warning == "" {
+		t.Fatalf("expected email warning status, got %#v", statuses[0])
+	}
+	if statuses[1].Channel != "log" || !statuses[1].RuntimeNotified {
+		t.Fatalf("expected successful log delivery status, got %#v", statuses[1])
+	}
+}
+
+func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
+	statuses := []deliveryStatus{{Channel: "bead", Created: true}, {Channel: "mail", Target: "mayor", Error: "notify failed"}}
+	hasFailure := false
+	for _, status := range statuses {
+		if status.Error != "" {
+			hasFailure = true
+			break
+		}
+	}
+	result := map[string]interface{}{
+		"id":       "hq-esc1",
+		"severity": "critical",
+		"actions":  []string{"bead", "mail:mayor"},
+		"targets":  []string{"mayor"},
+		"delivery": statuses,
+		"status":   map[bool]string{true: "partial_failure", false: "ok"}[hasFailure],
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{"\"status\":\"partial_failure\"", "\"delivery\"", "\"channel\":\"mail\"", "\"error\":\"notify failed\""} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("json output missing %q: %s", want, text)
+		}
 	}
 }
 

@@ -104,7 +104,9 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 	// Send mail to each target (actions with "mail:" prefix)
 	router := mail.NewRouter(townRoot)
 	defer router.WaitPendingNotifications()
+	statuses := []deliveryStatus{{Channel: "bead", Created: true, Severity: severity}}
 	for _, target := range targets {
+		status := deliveryStatus{Target: target, Channel: "mail", Severity: severity, NotificationRoute: "mail+nudge"}
 		msg := &mail.Message{
 			From:     agentID,
 			To:       target,
@@ -127,13 +129,19 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 		}
 
 		if err := router.Send(msg); err != nil {
+			status.Error = err.Error()
+			statuses = append(statuses, status)
 			style.PrintWarning("failed to send to %s: %v", target, err)
 			continue
 		}
+		status.Persisted = true
+		status.RuntimeNotified = true
 
 		mailBeads := beads.New(beads.ResolveBeadsDir(townRoot))
 		mailIssue, err := mailBeads.FindLatestIssueByTitleAndAssignee(msg.Subject, mail.AddressToIdentity(target))
 		if err != nil {
+			status.Warning = fmt.Sprintf("annotation lookup failed: %v", err)
+			statuses = append(statuses, status)
 			style.PrintWarning("failed to annotate escalation mail for %s: %v", target, err)
 			continue
 		}
@@ -143,12 +151,16 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 			fmt.Sprintf("escalation:%s", issue.ID),
 		}
 		if err := mailBeads.Update(mailIssue.ID, beads.UpdateOptions{AddLabels: addLabels}); err != nil {
+			status.Warning = fmt.Sprintf("annotation update failed: %v", err)
 			style.PrintWarning("failed to annotate escalation mail labels for %s: %v", target, err)
+		} else {
+			status.Annotated = true
 		}
+		statuses = append(statuses, status)
 	}
 
 	// Process external notification actions (email:, sms:, slack, log)
-	executeExternalActions(actions, escalationConfig, issue.ID, severity, description, townRoot)
+	statuses = append(statuses, executeExternalActions(actions, escalationConfig, issue.ID, severity, description, townRoot)...)
 
 	// Log to activity feed
 	payload := events.EscalationPayload(issue.ID, agentID, strings.Join(targets, ","), description)
@@ -161,11 +173,20 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 
 	// Output
 	if escalateJSON {
+		hasFailure := false
+		for _, status := range statuses {
+			if status.Error != "" {
+				hasFailure = true
+				break
+			}
+		}
 		result := map[string]interface{}{
 			"id":       issue.ID,
 			"severity": severity,
 			"actions":  actions,
 			"targets":  targets,
+			"delivery": statuses,
+			"status":   map[bool]string{true: "partial_failure", false: "ok"}[hasFailure],
 		}
 		if escalateSource != "" {
 			result["source"] = escalateSource
@@ -180,9 +201,27 @@ func runEscalate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Source: %s\n", escalateSource)
 		}
 		fmt.Printf("  Routed to: %s\n", strings.Join(targets, ", "))
+		for _, status := range statuses {
+			if status.Error != "" {
+				fmt.Printf("  Delivery issue [%s:%s]: %s\n", status.Channel, status.Target, status.Error)
+			}
+		}
 	}
 
 	return nil
+}
+
+type deliveryStatus struct {
+	Target            string `json:"target,omitempty"`
+	Channel           string `json:"channel"`
+	Created           bool   `json:"created,omitempty"`
+	Persisted         bool   `json:"persisted,omitempty"`
+	RuntimeNotified   bool   `json:"runtime_notified,omitempty"`
+	Annotated         bool   `json:"annotated,omitempty"`
+	Severity          string `json:"severity,omitempty"`
+	Error             string `json:"error,omitempty"`
+	Warning           string `json:"warning,omitempty"`
+	NotificationRoute string `json:"notification_route,omitempty"`
 }
 
 func runEscalateList(cmd *cobra.Command, args []string) error {
@@ -573,54 +612,77 @@ func extractMailTargetsFromActions(actions []string) []string {
 }
 
 // executeExternalActions processes external notification actions (email:, sms:, slack, log).
-func executeExternalActions(actions []string, cfg *config.EscalationConfig, beadID, severity, description, townRoot string) {
+func executeExternalActions(actions []string, cfg *config.EscalationConfig, beadID, severity, description, townRoot string) []deliveryStatus {
+	statuses := []deliveryStatus{}
 	for _, action := range actions {
 		switch {
 		case strings.HasPrefix(action, "email:"):
+			status := deliveryStatus{Channel: "email", Target: strings.TrimPrefix(action, "email:"), Severity: severity}
 			if cfg.Contacts.HumanEmail == "" {
+				status.Warning = "contacts.human_email not configured"
 				style.PrintWarning("email action '%s' skipped: contacts.human_email not configured in settings/escalation.json", action)
 			} else if cfg.Contacts.SMTPHost == "" {
+				status.Warning = "contacts.smtp_host not configured"
 				style.PrintWarning("email action '%s' skipped: contacts.smtp_host not configured in settings/escalation.json", action)
 			} else {
 				if err := sendEscalationEmail(cfg, beadID, severity, description); err != nil {
+					status.Error = err.Error()
 					style.PrintWarning("email send failed: %v", err)
 				} else {
+					status.RuntimeNotified = true
 					fmt.Printf("  📧 Email sent to %s\n", cfg.Contacts.HumanEmail)
 				}
 			}
+			statuses = append(statuses, status)
 
 		case strings.HasPrefix(action, "sms:"):
+			status := deliveryStatus{Channel: "sms", Target: strings.TrimPrefix(action, "sms:"), Severity: severity}
 			if cfg.Contacts.HumanSMS == "" {
+				status.Warning = "contacts.human_sms not configured"
 				style.PrintWarning("sms action '%s' skipped: contacts.human_sms not configured in settings/escalation.json", action)
 			} else if cfg.Contacts.SMSWebhook == "" {
+				status.Warning = "contacts.sms_webhook not configured"
 				style.PrintWarning("sms action '%s' skipped: contacts.sms_webhook not configured in settings/escalation.json", action)
 			} else {
 				if err := sendEscalationSMS(cfg, beadID, severity, description); err != nil {
+					status.Error = err.Error()
 					style.PrintWarning("sms send failed: %v", err)
 				} else {
+					status.RuntimeNotified = true
 					fmt.Printf("  📱 SMS sent to %s\n", cfg.Contacts.HumanSMS)
 				}
 			}
+			statuses = append(statuses, status)
 
 		case action == "slack":
+			status := deliveryStatus{Channel: "slack", Target: "slack", Severity: severity}
 			if cfg.Contacts.SlackWebhook == "" {
+				status.Warning = "contacts.slack_webhook not configured"
 				style.PrintWarning("slack action skipped: contacts.slack_webhook not configured in settings/escalation.json")
 			} else {
 				if err := sendEscalationSlack(cfg, beadID, severity, description); err != nil {
+					status.Error = err.Error()
 					style.PrintWarning("slack post failed: %v", err)
 				} else {
+					status.RuntimeNotified = true
 					fmt.Printf("  💬 Posted to Slack\n")
 				}
 			}
+			statuses = append(statuses, status)
 
 		case action == "log":
+			status := deliveryStatus{Channel: "log", Target: "log", Severity: severity}
 			if err := writeEscalationLog(townRoot, beadID, severity, description); err != nil {
+				status.Error = err.Error()
 				style.PrintWarning("log write failed: %v", err)
 			} else {
+				status.RuntimeNotified = true
 				fmt.Printf("  📝 Logged to escalation log\n")
 			}
+			statuses = append(statuses, status)
 		}
 	}
+	return statuses
 }
 
 // sendEscalationEmail sends an escalation notification via SMTP.
